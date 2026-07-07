@@ -62,11 +62,39 @@ self-contained and imports from `src/`. Save the frozen split + checkpoints to
 Google Drive to survive session timeouts.
 
 ## Who did what
-| Member | Responsibility |
-|--------|----------------|
-| A | Data prep, EDA, time split, shared eval pipeline, baselines, LightGBM ranking |
-| B | MF-BPR (from scratch), FAISS retrieval |
-| C | Two-tower (from scratch), embedding export, similar-items |
-| D | Webapp: Postgres, FastAPI, Streamlit, Docker, latency logging |
+| Member | Responsibility | Notebook(s) |
+|--------|----------------|-------------|
+| A | Data prep, EDA, time split, shared eval pipeline, baselines, feature engineering, LightGBM ranking | 01, 02, 05 |
+| B | MF-BPR (from scratch), FAISS retrieval | 03 |
+| C | Two-tower (from scratch), embedding export, similar-items | 04 |
+| D | Webapp: Postgres, FastAPI, Streamlit, Docker, latency logging | — (`api/`, `frontend/`, `db/`) |
 
-_(Adjust to reality — the brief grades an accurate task split.)_
+_(Names go here — the brief grades an accurate task split, not the placeholder letters.)_
+
+## Current status
+
+- `src/data/load.py` and `src/data/split.py` (the blocker in `PROJECT_GUIDE.md`) are implemented,
+  including `encode_ids` for the train-fit id encoding MF-BPR/two-tower need.
+- Notebook 01 (data prep/EDA) has been run end-to-end on a real local sample (see its saved
+  outputs) — 700k raw reviews streamed → 131,154 interactions after 5-core → 111,481/6,557/13,116
+  train/val/test.
+- Notebooks 02-05 are fully written (baselines, MF-BPR, two-tower, LightGBM) and their core logic
+  has been correctness-tested, but the actual training runs (and this README's results table)
+  are meant to be executed on the full pipeline in Colab per `PROJECT_GUIDE.md` §4 — run them in
+  order 02 → 03 → 04 → 05 and each notebook's final cell saves what the next one needs.
+- The Docker/Postgres/FastAPI/Streamlit stack has been verified end-to-end in degraded
+  (popularity-only) mode: `docker compose up`, `/health`, `/popular`, `/recommend` (cold-user
+  fallback), `/similar` (unknown-item fallback), `/because-you-liked`, and `scripts/benchmark_latency.py`
+  all work correctly against a live stack. Sample latency on this machine (popularity-only,
+  no retrieval/ranking yet): DB ~3ms, total ~18ms mean / ~29ms p95 over 25 calls — expect this to
+  rise once the two-tower + LightGBM path is live (adds a user-tower forward pass, a FAISS search,
+  and an LGBM predict per request).
+- **Found and fixed a real bug** while verifying the stack: `scripts/populate_db.py` used
+  `.where(pd.notnull(items), None)` to convert missing prices to `NULL` before inserting into
+  Postgres — but `.where(..., None)` on a `float64` column silently coerces `None` back to `NaN`
+  (the column can't hold `None`), so items with no price landed in Postgres as literal `NaN`
+  rather than `NULL`. Postgres accepts `NaN` in a `real` column, but FastAPI's JSON encoder
+  rejects it (`ValueError: Out of range float values are not JSON compliant`), which 500'd
+  `/popular` — the very first, always-available endpoint — for any response that happened to
+  include one of the ~19% of items with no listed price. Fixed by casting to `object` dtype
+  before the `.where()` call so `None` actually sticks.

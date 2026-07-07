@@ -24,6 +24,7 @@ class Recommender:
         self.faiss = None
         if self.item_emb is not None:
             import faiss
+            faiss.omp_set_num_threads(1)   # avoid a torch/faiss OpenMP segfault on macOS arm64
             emb = self.item_emb.astype("float32"); faiss.normalize_L2(emb)
             self.faiss = faiss.IndexFlatIP(emb.shape[1]); self.faiss.add(emb)
         self.tower = self._maybe(self._load_tower)

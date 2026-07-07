@@ -5,8 +5,6 @@ from pathlib import Path
 # ---- Dataset ----
 CATEGORY = "Electronics"                      # Amazon Reviews 2023 category
 HF_DATASET = "McAuley-Lab/Amazon-Reviews-2023"
-REVIEW_CONFIG = f"raw_review_{CATEGORY}"
-META_CONFIG = f"raw_meta_{CATEGORY}"
 
 # ---- Subsampling (DOCUMENT every choice in the notebook) ----
 RECENT_FROM_YEAR = 2019      # keep interactions on/after this year before k-core

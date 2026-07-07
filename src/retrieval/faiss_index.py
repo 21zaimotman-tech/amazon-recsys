@@ -8,6 +8,11 @@ from __future__ import annotations
 import numpy as np
 import faiss
 
+# A multi-threaded faiss search after torch has initialized its own threading
+# segfaults on macOS arm64 (faiss/torch OpenMP conflict) — harmless to force
+# single-threaded at these catalog sizes (thousands-tens of thousands of items).
+faiss.omp_set_num_threads(1)
+
 
 class EmbeddingIndex:
     def __init__(self, item_embeddings: np.ndarray, item_ids: list, normalize=True):
@@ -47,8 +52,13 @@ class EmbeddingIndex:
 
     def similar_items(self, item_id, n=10):
         """Cosine nearest neighbours of one item — powers 'Similar items' and
-        'Because you liked X' in the webapp. These are static -> precompute."""
-        pos = int(np.where(self.item_ids == item_id)[0][0])
+        'Because you liked X' in the webapp. These are static -> precompute.
+        Returns [] for an unknown item_id so callers (the API) can degrade to
+        popularity instead of crashing."""
+        matches = np.where(self.item_ids == item_id)[0]
+        if len(matches) == 0:
+            return []
+        pos = int(matches[0])
         vec = self._emb[pos:pos+1]
         _, idx = self.index.search(vec, n + 1)
         return [self.item_ids[j].tolist() for j in idx[0] if self.item_ids[j] != item_id][:n]

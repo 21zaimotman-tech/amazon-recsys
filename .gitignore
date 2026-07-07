@@ -3,10 +3,13 @@ __pycache__/
 .venv/
 venv/
 data/
+rawdata/
 artifacts/*.npy
 artifacts/*.pt
 artifacts/*.pkl
+artifacts/*.json
 .env
+docker-compose.override.yml
 .ipynb_checkpoints/
 .vscode/
 .idea/
