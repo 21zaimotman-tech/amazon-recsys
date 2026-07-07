@@ -59,12 +59,21 @@ class MFBPR(nn.Module):
         return loss + reg / len(u)
 
 
-def sample_triplets(train_df, n_items, rng, batch_size):
+def sample_triplets(train_df, n_items, rng, batch_size, pos=None, user_items=None):
     """Uniformly sample (u, pos_i, neg_j). neg_j is a random item the user has
     not interacted with. BONUS: try popularity-based negative sampling and
-    compare (see the bonus list)."""
-    pos = train_df[["u", "i"]].values
-    user_items = train_df.groupby("u")["i"].agg(set).to_dict()
+    compare (see the bonus list).
+
+    `pos`/`user_items` can be precomputed once by the caller and passed in —
+    rebuilding `user_items` (a groupby + per-user set) from scratch on every
+    call is fine for a handful of calls, but train_mfbpr calls this once per
+    *step* (thousands of times per epoch), where re-deriving it every time
+    dominates the runtime and starves the GPU of work. Passing it in once
+    keeps the actual sampling logic below identical."""
+    if pos is None:
+        pos = train_df[["u", "i"]].values
+    if user_items is None:
+        user_items = train_df.groupby("u")["i"].agg(set).to_dict()
     idx = rng.integers(0, len(pos), size=batch_size)
     u = pos[idx, 0]
     i = pos[idx, 1]
@@ -80,10 +89,12 @@ def train_mfbpr(train_df, n_users, n_items, dim=64, lr=0.05, reg=1e-5,
     rng = np.random.default_rng(0)
     model = MFBPR(n_users, n_items, dim, reg).to(device)
     opt = torch.optim.SGD(model.parameters(), lr=lr)
+    pos = train_df[["u", "i"]].values                             # built once, not per step
+    user_items = train_df.groupby("u")["i"].agg(set).to_dict()    # built once, not per step
     for ep in range(epochs):
         model.train(); running = 0.0
         for _ in range(steps_per_epoch):
-            u, i, j = sample_triplets(train_df, n_items, rng, batch_size)
+            u, i, j = sample_triplets(train_df, n_items, rng, batch_size, pos, user_items)
             u = torch.as_tensor(u, device=device); i = torch.as_tensor(i, device=device)
             j = torch.as_tensor(j, device=device)
             opt.zero_grad()
