@@ -104,7 +104,10 @@ body { background: #FAFAFA; }
     transition: transform 150ms ease, box-shadow 150ms ease;
     height: 100%;
 }
-.ep-card:hover {
+/* the click target is an invisible button layered on top of (a sibling of,
+   not a descendant of) .ep-card, so :hover on the card itself never fires --
+   the shared column ancestor is what actually receives the pointer. */
+div[data-testid="stColumn"]:hover .ep-card {
     transform: translateY(-4px);
     box-shadow: 0 8px 20px rgba(17, 24, 39, 0.08);
     border-color: #E5E7EB;
@@ -129,23 +132,51 @@ body { background: #FAFAFA; }
     padding: 0.1rem 0.45rem; border-radius: 999px;
 }
 
-/* real Streamlit button rendered under each card, styled to read as "View" */
-div[data-testid="column"] .stButton button {
-    width: 100%; border-radius: 8px; border: 1px solid #E5E7EB; background: #FFFFFF;
-    color: #2563EB; font-size: 0.75rem; font-weight: 600; padding: 0.25rem 0;
-    margin-top: 0.35rem;
+/* The whole card is clickable: an invisible real Streamlit button is
+   absolutely positioned over the entire column, on top of the pure-HTML
+   card underneath it, so any click on the card (not just a small "View"
+   button) opens the detail panel while the click target stays a real
+   Streamlit widget (raw HTML can't trigger a Python callback). */
+div[data-testid="stColumn"] { position: relative !important; }
+/* Streamlit gives the button's own stElementContainer position:relative by
+   default, making IT (not stColumn) the containing block for our absolutely
+   positioned button -- and since that container collapses to height:0 (its
+   only child is now absolutely positioned, contributing no intrinsic
+   height back to it), inset:0 resolves against a zero-height box. Force it
+   back to static so stColumn is the containing block instead. */
+div[data-testid="stColumn"] div[data-testid="stElementContainer"] { position: static !important; }
+div[data-testid="stColumn"] div[data-testid="stButton"] {
+    position: absolute !important;
+    top: 0 !important; left: 0 !important; right: 0 !important; bottom: 0 !important;
+    width: 100% !important; height: 100% !important;
+    z-index: 5 !important; margin: 0 !important;
 }
-div[data-testid="column"] .stButton button:hover { background: #EFF6FF; border-color: #2563EB; }
+div[data-testid="stColumn"] div[data-testid="stButton"] button {
+    width: 100% !important; height: 100% !important;
+    opacity: 0 !important; cursor: pointer; border: none !important; background: transparent !important;
+}
+.ep-card-hint {
+    font-size: 0.68rem; color: #2563EB; font-weight: 600; margin-top: 0.35rem; opacity: 0;
+    transition: opacity 150ms ease;
+}
+div[data-testid="stColumn"]:hover .ep-card-hint { opacity: 1; }
 
-/* ---- horizontal scroll row (Because you liked) ---- */
-.ep-hscroll { display: flex; gap: 0.75rem; overflow-x: auto; padding: 0.2rem 0.1rem 0.9rem 0.1rem; }
-.ep-hscroll::-webkit-scrollbar { height: 6px; }
-.ep-hscroll::-webkit-scrollbar-thumb { background: #E5E7EB; border-radius: 999px; }
+/* ---- horizontal scroll rows (Because you liked / Similar items) ---- */
+div[class*="st-key-hscroll-"] div[data-testid="stHorizontalBlock"] {
+    overflow-x: auto; flex-wrap: nowrap; padding-bottom: 0.6rem; gap: 0.75rem;
+}
+div[class*="st-key-hscroll-"] div[data-testid="stHorizontalBlock"]::-webkit-scrollbar { height: 6px; }
+div[class*="st-key-hscroll-"] div[data-testid="stHorizontalBlock"]::-webkit-scrollbar-thumb {
+    background: #E5E7EB; border-radius: 999px;
+}
+div[class*="st-key-hscroll-"] div[data-testid="stColumn"] { min-width: 130px; flex: 0 0 130px; }
 .ep-hcard {
-    flex: 0 0 130px; background: #FFFFFF; border: 1px solid #EEF0F3; border-radius: 12px;
+    background: #FFFFFF; border: 1px solid #EEF0F3; border-radius: 12px;
     padding: 0.5rem; transition: transform 150ms ease, box-shadow 150ms ease;
 }
-.ep-hcard:hover { transform: translateY(-3px); box-shadow: 0 6px 14px rgba(17,24,39,0.07); }
+div[class*="st-key-hscroll-"] div[data-testid="stColumn"]:hover .ep-hcard {
+    transform: translateY(-3px); box-shadow: 0 6px 14px rgba(17,24,39,0.07);
+}
 .ep-hcard-img { width: 100%; aspect-ratio: 1/1; object-fit: cover; border-radius: 8px; }
 .ep-hcard-placeholder {
     width: 100%; aspect-ratio: 1/1; border-radius: 8px; font-size: 1.8rem;
@@ -235,10 +266,17 @@ def _filter(items, query):
     return [it for it in items if q in (it.get("title") or it.get("item_id") or "").lower()]
 
 
+def _select_item(item_id):
+    st.session_state.selected_item = item_id
+    st.rerun()
+
+
 def render_grid(items, model_label, key_prefix, cols_n=5):
-    """Interactive product grid: each card gets a real Streamlit button beneath
-    it (click -> detail panel) so the visual card can stay pure HTML/CSS while
-    the click target stays inside Streamlit's own component model."""
+    """Interactive product grid: each card is pure HTML/CSS, with a real but
+    invisible Streamlit button layered on top of the whole column (see the
+    CSS above) so clicking anywhere on the card -- not just a small "View"
+    label -- opens the detail panel. Raw HTML can't trigger a Python
+    callback, so the click target has to stay a real Streamlit widget."""
     cache_items(items)
     shown = _filter(items, search_query)
     if not shown:
@@ -253,43 +291,47 @@ def render_grid(items, model_label, key_prefix, cols_n=5):
                 title = (it.get("title") or it.get("item_id"))[:70]
                 meta = " · ".join(filter(None, [it.get("category"), it.get("brand")]))
                 price = f"${it['price']:.2f}" if it.get("price") else ""
-                bg, fg = _category_tint(it.get("category") or "")
                 if it.get("image_url"):
                     media = f'<img class="ep-card-img" src="{it["image_url"]}" />'
                 else:
+                    bg, _ = _category_tint(it.get("category") or "")
                     icon = _category_icon(it.get("category"), title)
                     media = f'<div class="ep-card-placeholder" style="background:{bg};">{icon}</div>'
-                st.markdown(
-                    f"""<div class="ep-card">
-                        {media}
-                        <div class="ep-card-title">{title}</div>
-                        <div class="ep-card-meta">{meta}</div>
-                        <div class="ep-card-price">{price}</div>
-                        <span class="ep-card-badge" style="background:{tint_bg};color:{tint_fg};">{model_label}</span>
-                    </div>""",
-                    unsafe_allow_html=True,
+                card_html = (
+                    f'<div class="ep-card">{media}<div class="ep-card-title">{title}</div>'
+                    f'<div class="ep-card-meta">{meta}</div><div class="ep-card-price">{price}</div>'
+                    f'<span class="ep-card-badge" style="background:{tint_bg};color:{tint_fg};">{model_label}</span>'
+                    f'<div class="ep-card-hint">View details →</div></div>'
                 )
+                st.markdown(card_html, unsafe_allow_html=True)
                 if st.button("View", key=f"{key_prefix}-{it['item_id']}"):
-                    st.session_state.selected_item = it["item_id"]
-                    st.rerun()
+                    _select_item(it["item_id"])
 
 
-def render_hscroll(items, empty_caption="Nothing to show yet."):
+def render_hscroll(items, key_prefix, empty_caption="Nothing to show yet.", cols_n=7):
+    """Horizontal-scrolling row, e.g. Because you liked / Similar items.
+    Same invisible-full-column-button click pattern as render_grid, just
+    inside a keyed container so CSS can force real Streamlit columns to
+    scroll horizontally (st.columns has no native overflow behavior)."""
     cache_items(items)
     if not items:
         st.caption(empty_caption)
         return
-    cards = []
-    for it in items:
-        title = (it.get("title") or it.get("item_id"))[:40]
-        if it.get("image_url"):
-            media = f'<img class="ep-hcard-img" src="{it["image_url"]}" />'
-        else:
-            bg, _ = _category_tint(it.get("category") or "")
-            icon = _category_icon(it.get("category"), title)
-            media = f'<div class="ep-hcard-placeholder" style="background:{bg};">{icon}</div>'
-        cards.append(f'<div class="ep-hcard">{media}<div class="ep-hcard-title">{title}</div></div>')
-    st.markdown(f'<div class="ep-hscroll">{"".join(cards)}</div>', unsafe_allow_html=True)
+    with st.container(key=f"hscroll-{key_prefix}"):
+        cols = st.columns(max(len(items), cols_n))
+        for col, it in zip(cols, items):
+            with col:
+                title = (it.get("title") or it.get("item_id"))[:40]
+                if it.get("image_url"):
+                    media = f'<img class="ep-hcard-img" src="{it["image_url"]}" />'
+                else:
+                    bg, _ = _category_tint(it.get("category") or "")
+                    icon = _category_icon(it.get("category"), title)
+                    media = f'<div class="ep-hcard-placeholder" style="background:{bg};">{icon}</div>'
+                card_html = f'<div class="ep-hcard">{media}<div class="ep-hcard-title">{title}</div></div>'
+                st.markdown(card_html, unsafe_allow_html=True)
+                if st.button("View", key=f"{key_prefix}-h-{it['item_id']}"):
+                    _select_item(it["item_id"])
 
 
 def model_caption(model_label, latency_ms):
@@ -341,8 +383,7 @@ def render_detail_panel():
     st.markdown("**Similar items**")
     sim = get(f"/similar/{item_id}?n=10")
     if sim:
-        render_hscroll(sim["items"])
-    st.markdown("</div>", unsafe_allow_html=True)
+        render_hscroll(sim["items"], key_prefix="sim")
 
 
 # ---------------------------------------------------------------- main content
@@ -372,4 +413,4 @@ else:
             f'Because you liked {("“" + seed_title[:50] + "”") if seed_title else "this"}</div>',
             unsafe_allow_html=True,
         )
-        render_hscroll(byl["items"], empty_caption="No history yet for this user.")
+        render_hscroll(byl["items"], key_prefix="byl", empty_caption="No history yet for this user.")
