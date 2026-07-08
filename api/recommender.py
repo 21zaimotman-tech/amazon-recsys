@@ -43,7 +43,9 @@ class Recommender:
     def _load_tower(self):
         """TorchScripted user tower: (history_ids, mask) -> vector. No class needed."""
         import torch
-        m = torch.jit.load(str(ART / "user_tower.pt")); m.eval()
+        # map_location="cpu": the checkpoint may have been scripted on a CUDA runtime
+        # (Colab) -- this container has no GPU, so loading without it fails outright.
+        m = torch.jit.load(str(ART / "user_tower.pt"), map_location="cpu"); m.eval()
         def fn(hist_idx):
             if not hist_idx:
                 return None
