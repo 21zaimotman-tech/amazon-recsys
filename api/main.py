@@ -4,7 +4,8 @@ import time
 import psycopg2.errors
 from fastapi import FastAPI, HTTPException
 from .db import (get_conn, fetch_user_history, fetch_items, search_items, create_user,
-                 get_user, log_event, add_to_cart, remove_from_cart, get_cart)
+                 get_user, log_event, add_to_cart, remove_from_cart, get_cart, checkout,
+                 add_to_wishlist, remove_from_wishlist, get_wishlist)
 from .auth import hash_password, verify_password
 from .recommender import Recommender
 from .schemas import (RecResponse, Item, RegisterRequest, LoginRequest, AuthResponse,
@@ -174,6 +175,49 @@ def cart_view(user_id: str):
     conn = get_conn()
     try:
         items = get_cart(conn, user_id)
+    finally:
+        conn.close()
+    return CartResponse(items=[Item(**it) for it in items])
+
+
+@app.post("/checkout/{user_id}", response_model=CartResponse)
+def cart_checkout(user_id: str):
+    """'Buy Now': no real payment (this is a demo), but logs every cart item
+    as a purchase -- the strongest positive signal -- and empties the cart."""
+    conn = get_conn()
+    try:
+        items = checkout(conn, user_id)
+    finally:
+        conn.close()
+    return CartResponse(items=[Item(**it) for it in items])
+
+
+# ---------------------------------------------------------------- wishlist
+@app.post("/wishlist/{user_id}/{item_id}")
+def wishlist_add(user_id: str, item_id: str):
+    conn = get_conn()
+    try:
+        add_to_wishlist(conn, user_id, item_id)
+    finally:
+        conn.close()
+    return {"status": "ok"}
+
+
+@app.delete("/wishlist/{user_id}/{item_id}")
+def wishlist_remove(user_id: str, item_id: str):
+    conn = get_conn()
+    try:
+        remove_from_wishlist(conn, user_id, item_id)
+    finally:
+        conn.close()
+    return {"status": "ok"}
+
+
+@app.get("/wishlist/{user_id}", response_model=CartResponse)
+def wishlist_view(user_id: str):
+    conn = get_conn()
+    try:
+        items = get_wishlist(conn, user_id)
     finally:
         conn.close()
     return CartResponse(items=[Item(**it) for it in items])

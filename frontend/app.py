@@ -137,22 +137,35 @@ div[data-testid="stColumn"]:hover .ep-card {
    absolutely positioned over the entire column, on top of the pure-HTML
    card underneath it, so any click on the card (not just a small "View"
    button) opens the detail panel while the click target stays a real
-   Streamlit widget (raw HTML can't trigger a Python callback). */
+   Streamlit widget (raw HTML can't trigger a Python callback).
+
+   IMPORTANT: this must be scoped to buttons keyed "cardview-*" specifically
+   (via the [class*="st-key-cardview-"] qualifier below), not every button
+   inside every stColumn -- an earlier, broader version of this rule made
+   the detail panel's Close/Like/Wishlist/Add-to-cart buttons invisible too,
+   since those also happen to live inside st.columns(). They existed and
+   were clickable (Playwright found them fine) but opacity:0 hid them from
+   view entirely -- a real bug, caught by screenshot, not by any exception. */
 div[data-testid="stColumn"] { position: relative !important; }
-/* Streamlit gives the button's own stElementContainer position:relative by
+/* Streamlit gives a button's own stElementContainer position:relative by
    default, making IT (not stColumn) the containing block for our absolutely
    positioned button -- and since that container collapses to height:0 (its
    only child is now absolutely positioned, contributing no intrinsic
    height back to it), inset:0 resolves against a zero-height box. Force it
-   back to static so stColumn is the containing block instead. */
-div[data-testid="stColumn"] div[data-testid="stElementContainer"] { position: static !important; }
-div[data-testid="stColumn"] div[data-testid="stButton"] {
+   back to static so stColumn is the containing block instead -- but again,
+   only for cardview-keyed buttons, not globally. */
+div[data-testid="stColumn"] div[data-testid="stElementContainer"][class*="st-key-cardview-"] {
+    position: static !important;
+}
+div[data-testid="stColumn"] div[data-testid="stElementContainer"][class*="st-key-cardview-"]
+    div[data-testid="stButton"] {
     position: absolute !important;
     top: 0 !important; left: 0 !important; right: 0 !important; bottom: 0 !important;
     width: 100% !important; height: 100% !important;
     z-index: 5 !important; margin: 0 !important;
 }
-div[data-testid="stColumn"] div[data-testid="stButton"] button {
+div[data-testid="stColumn"] div[data-testid="stElementContainer"][class*="st-key-cardview-"]
+    div[data-testid="stButton"] button {
     width: 100% !important; height: 100% !important;
     opacity: 0 !important; cursor: pointer; border: none !important; background: transparent !important;
 }
@@ -312,6 +325,19 @@ def cart_remove(item_id):
     delete(f"/cart/{st.session_state.user_id}/{item_id}")
 
 
+def wishlist_add(item_id):
+    requests.post(f"{API}/wishlist/{st.session_state.user_id}/{item_id}", timeout=10)
+
+
+def wishlist_remove(item_id):
+    delete(f"/wishlist/{st.session_state.user_id}/{item_id}")
+
+
+def checkout():
+    data, status, detail = post(f"/checkout/{st.session_state.user_id}")
+    return data
+
+
 def render_auth_popover():
     tab_login, tab_signup = st.tabs(["Log in", "Sign up"])
     with tab_login:
@@ -353,6 +379,7 @@ def render_cart_popover(cart):
     if not cart or not cart["items"]:
         st.caption("Your cart is empty.")
         return
+    total = sum(it["price"] for it in cart["items"] if it.get("price"))
     for it in cart["items"]:
         price = f" · ${it['price']:.2f}" if it.get("price") else ""
         title = (it.get("title") or it.get("item_id") or "")[:45]
@@ -360,26 +387,66 @@ def render_cart_popover(cart):
         if st.button("✕ Remove", key=f"cart-rm-{it['item_id']}"):
             cart_remove(it["item_id"])
             st.rerun()
+    st.divider()
+    if total:
+        st.markdown(f"**Total: ${total:.2f}**", unsafe_allow_html=True)
+    if st.button("✅ Buy now", key="buy-now", use_container_width=True):
+        bought = checkout()
+        if bought:
+            n = len(bought["items"])
+            st.toast(f"Order placed — {n} item{'s' if n != 1 else ''}. Thanks!", icon="✅")
+            st.rerun()
+
+
+def render_wishlist_popover(wishlist):
+    """Same no-nested-columns constraint as render_cart_popover."""
+    if not wishlist or not wishlist["items"]:
+        st.caption("Your wishlist is empty.")
+        return
+    for it in wishlist["items"]:
+        price = f" · ${it['price']:.2f}" if it.get("price") else ""
+        title = (it.get("title") or it.get("item_id") or "")[:45]
+        st.markdown(f"<b>{title}</b>{price}", unsafe_allow_html=True)
+        if st.button("✕ Remove", key=f"wish-rm-{it['item_id']}"):
+            wishlist_remove(it["item_id"])
+            st.rerun()
+        if st.button("🛒 Move to cart", key=f"wish-cart-{it['item_id']}"):
+            cart_add(it["item_id"])
+            wishlist_remove(it["item_id"])
+            st.rerun()
 
 
 # ---------------------------------------------------------------- header
-head_l, head_c, head_r = st.columns([2, 3, 2.6])
+head_l, head_c, head_r = st.columns([2, 3, 3.2])
 with head_l:
     st.markdown('<div class="ep-wordmark">Electro<span>Picks</span></div>', unsafe_allow_html=True)
+    # Invisible full-column button, same overlay technique as product cards
+    # (see the stColumn/stButton CSS above) -- clicking the logo area resets
+    # to the main feed: clears the open detail panel and the search box.
+    if st.button("Home", key="cardview-home-nav"):
+        st.session_state.selected_item = None
+        st.session_state["search_box"] = ""
+        st.rerun()
 with head_c:
     search_query = st.text_input(
-        "Search", "", placeholder="Search the current results…", label_visibility="collapsed"
+        "Search", "", placeholder="Search the current results…", label_visibility="collapsed",
+        key="search_box",
     )
 with head_r:
     if st.session_state.user_id:
-        cart_col, user_col = st.columns(2)
+        wish_col, cart_col, user_col = st.columns(3)
+        with wish_col:
+            wishlist_data = get(f"/wishlist/{st.session_state.user_id}")
+            n_wish = len(wishlist_data["items"]) if wishlist_data else 0
+            with st.popover(f"♡ ({n_wish})" if n_wish else "♡ Wishlist", use_container_width=True):
+                render_wishlist_popover(wishlist_data)
         with cart_col:
             cart_data = get(f"/cart/{st.session_state.user_id}")
             n_cart = len(cart_data["items"]) if cart_data else 0
             with st.popover(f"🛒 Cart ({n_cart})" if n_cart else "🛒 Cart", use_container_width=True):
                 render_cart_popover(cart_data)
         with user_col:
-            uid_short = st.session_state.user_id[:12] + ("…" if len(st.session_state.user_id) > 12 else "")
+            uid_short = st.session_state.user_id[:10] + ("…" if len(st.session_state.user_id) > 10 else "")
             with st.popover(f"👤 {uid_short}", use_container_width=True):
                 st.write(f"Logged in as **{st.session_state.user_id}**")
                 if st.button("Log out", use_container_width=True):
@@ -445,7 +512,7 @@ def render_grid(items, model_label, key_prefix, cols_n=5):
                     f'<div class="ep-card-hint">View details →</div></div>'
                 )
                 st.markdown(card_html, unsafe_allow_html=True)
-                if st.button("View", key=f"{key_prefix}-{it['item_id']}"):
+                if st.button("View", key=f"cardview-{key_prefix}-{it['item_id']}"):
                     _select_item(it["item_id"])
                 if st.session_state.user_id:
                     if st.button("🛒", key=f"cardcart-{key_prefix}-{it['item_id']}", help="Add to cart"):
@@ -476,7 +543,7 @@ def render_hscroll(items, key_prefix, empty_caption="Nothing to show yet.", cols
                     media = f'<div class="ep-hcard-placeholder" style="background:{bg};">{icon}</div>'
                 card_html = f'<div class="ep-hcard">{media}<div class="ep-hcard-title">{title}</div></div>'
                 st.markdown(card_html, unsafe_allow_html=True)
-                if st.button("View", key=f"{key_prefix}-h-{it['item_id']}"):
+                if st.button("View", key=f"cardview-{key_prefix}-h-{it['item_id']}"):
                     _select_item(it["item_id"])
 
 
@@ -524,7 +591,7 @@ def render_detail_panel():
     )
     st.markdown(detail_html, unsafe_allow_html=True)
 
-    close_col, like_col, cart_col = st.columns([1, 1, 1.4])
+    close_col, like_col, wish_col, cart_col = st.columns([1, 1, 1.2, 1.4])
     with close_col:
         if st.button("✕ Close", key="close-detail"):
             st.session_state.selected_item = None
@@ -534,14 +601,19 @@ def render_detail_panel():
             if st.button("♡ Like", key=f"like-{item_id}"):
                 like_item(item_id)
                 st.toast("Liked — your recommendations will reflect this now.", icon="❤️")
-                st.rerun()   # header (incl. the Cart popover) renders earlier in the script
-        with cart_col:                                     # than this handler on THIS pass, so
-            if st.button("🛒 Add to cart", key=f"cart-{item_id}"):  # it'd otherwise show pre-click
-                cart_add(item_id)                           # state until some other rerun happened
+                st.rerun()   # header (incl. the Cart/Wishlist popovers) renders earlier in the
+        with wish_col:                                      # script than this handler on THIS pass,
+            if st.button("☆ Wishlist", key=f"wish-{item_id}"):  # so it'd show pre-click state
+                wishlist_add(item_id)                        # until some other rerun happened
+                st.toast("Saved to wishlist.", icon="⭐")
+                st.rerun()
+        with cart_col:
+            if st.button("🛒 Add to cart", key=f"cart-{item_id}"):
+                cart_add(item_id)
                 st.toast("Added to cart.", icon="🛒")
                 st.rerun()
     else:
-        st.caption("Log in to like items or add them to your cart.")
+        st.caption("Log in to like, save, or buy items.")
 
     st.markdown("**Similar items**")
     sim = get(f"/similar/{item_id}?n=10")

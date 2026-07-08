@@ -72,7 +72,7 @@ def get_user(conn, user_id):
 # `interactions`, which fetch_user_history reads fresh on every /recommend
 # call, so it changes what the (already-trained) two-tower model serves
 # without needing any retraining.
-_EVENT_RATING = {"view": 3.0, "like": 5.0, "cart": 5.0}
+_EVENT_RATING = {"view": 3.0, "like": 5.0, "cart": 5.0, "wishlist": 4.0, "purchase": 5.0}
 
 
 def log_event(conn, user_id, item_id, event_type):
@@ -111,4 +111,42 @@ def get_cart(conn, user_id):
             "SELECT i.item_id, i.title, i.image_url, i.category, i.brand, i.price "
             "FROM cart c JOIN items i ON i.item_id = c.item_id "
             "WHERE c.user_id=%s ORDER BY c.added_at DESC", (user_id,))
+        return [dict(r) for r in cur.fetchall()]
+
+
+def checkout(conn, user_id):
+    """'Buy Now': logs every cart item as a purchase (the strongest positive
+    signal) and empties the cart. No real payment processing -- this is a
+    demo -- but the behavioral feedback loop into /recommend is real."""
+    items = get_cart(conn, user_id)
+    for it in items:
+        log_event(conn, user_id, it["item_id"], "purchase")
+    with conn.cursor() as cur:
+        cur.execute("DELETE FROM cart WHERE user_id=%s", (user_id,))
+    conn.commit()
+    return items
+
+
+# ---------------------------------------------------------------- wishlist
+def add_to_wishlist(conn, user_id, item_id):
+    with conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO wishlist (user_id, item_id) VALUES (%s,%s) "
+            "ON CONFLICT (user_id, item_id) DO NOTHING", (user_id, item_id))
+    conn.commit()
+    log_event(conn, user_id, item_id, "wishlist")
+
+
+def remove_from_wishlist(conn, user_id, item_id):
+    with conn.cursor() as cur:
+        cur.execute("DELETE FROM wishlist WHERE user_id=%s AND item_id=%s", (user_id, item_id))
+    conn.commit()
+
+
+def get_wishlist(conn, user_id):
+    with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+        cur.execute(
+            "SELECT i.item_id, i.title, i.image_url, i.category, i.brand, i.price "
+            "FROM wishlist w JOIN items i ON i.item_id = w.item_id "
+            "WHERE w.user_id=%s ORDER BY w.added_at DESC", (user_id,))
         return [dict(r) for r in cur.fetchall()]

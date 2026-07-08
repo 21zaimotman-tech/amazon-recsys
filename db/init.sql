@@ -38,3 +38,12 @@ CREATE TABLE IF NOT EXISTS cart (
     added_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     PRIMARY KEY (user_id, item_id)
 );
+
+-- "save for later", distinct from cart (intent to buy now) and from a Like
+-- (a one-off feedback signal, not a browsable list)
+CREATE TABLE IF NOT EXISTS wishlist (
+    user_id  TEXT REFERENCES users(user_id) ON DELETE CASCADE,
+    item_id  TEXT REFERENCES items(item_id),
+    added_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (user_id, item_id)
+);
