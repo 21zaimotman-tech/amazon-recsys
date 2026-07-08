@@ -209,8 +209,10 @@ if "item_cache" not in st.session_state:
     st.session_state.item_cache = {}
 if "selected_item" not in st.session_state:
     st.session_state.selected_item = None
-if "logged_in" not in st.session_state:
-    st.session_state.logged_in = False
+if "user_id" not in st.session_state:
+    st.session_state.user_id = None            # set only after a real /auth/login or /auth/register
+if "viewed_items" not in st.session_state:
+    st.session_state.viewed_items = set()       # de-dupes "view" event logging per browser session
 
 
 def cache_items(items):
@@ -228,13 +230,113 @@ def get(path):
         return None
 
 
+def post(path, json_body=None, quiet_errors=()):
+    """POST/DELETE helper mirroring get()'s error-handling pattern.
+    quiet_errors: HTTP status codes to surface as a return value instead of
+    an st.error banner (e.g. 401 on login -- that's an expected outcome of
+    a bad password, not an API failure worth alarming the whole page over)."""
+    try:
+        r = requests.post(f"{API}{path}", json=json_body, timeout=10)
+        if r.status_code in quiet_errors:
+            return None, r.status_code, r.json().get("detail", "")
+        r.raise_for_status()
+        return r.json(), r.status_code, None
+    except requests.HTTPError as e:
+        st.error(f"API error on {path}: {e}")
+        return None, e.response.status_code if e.response is not None else None, None
+    except Exception as e:
+        st.error(f"API error on {path}: {e}")
+        return None, None, None
+
+
+def delete(path):
+    try:
+        r = requests.delete(f"{API}{path}", timeout=10)
+        r.raise_for_status()
+        return r.json()
+    except Exception as e:
+        st.error(f"API error on {path}: {e}")
+        return None
+
+
 def _latency_ms_text(latency_ms: dict) -> str:
     total = (latency_ms or {}).get("total")
     return f"{total:.0f}ms" if isinstance(total, (int, float)) else "—"
 
 
+# ---------------------------------------------------------------- accounts + events
+def log_view(item_id):
+    """Once per item per browser session -- avoid re-logging a "view" on
+    every rerun the detail panel stays open for (e.g. clicking Like)."""
+    if st.session_state.user_id and item_id not in st.session_state.viewed_items:
+        requests.post(f"{API}/events/{st.session_state.user_id}/{item_id}?event_type=view", timeout=10)
+        st.session_state.viewed_items.add(item_id)
+
+
+def like_item(item_id):
+    requests.post(f"{API}/events/{st.session_state.user_id}/{item_id}?event_type=like", timeout=10)
+
+
+def cart_add(item_id):
+    requests.post(f"{API}/cart/{st.session_state.user_id}/{item_id}", timeout=10)
+
+
+def cart_remove(item_id):
+    delete(f"/cart/{st.session_state.user_id}/{item_id}")
+
+
+def render_auth_popover():
+    tab_login, tab_signup = st.tabs(["Log in", "Sign up"])
+    with tab_login:
+        with st.form("login-form", border=False):
+            u = st.text_input("Username", key="login-user")
+            p = st.text_input("Password", type="password", key="login-pass")
+            if st.form_submit_button("Log in", use_container_width=True):
+                data, status, detail = post("/auth/login", {"user_id": u, "password": p},
+                                            quiet_errors=(401,))
+                if data:
+                    st.session_state.user_id = data["user_id"]
+                    st.session_state.viewed_items = set()
+                    st.rerun()
+                elif status == 401:
+                    st.error("Wrong username or password.")
+    with tab_signup:
+        with st.form("signup-form", border=False):
+            u = st.text_input("Choose a username", key="signup-user")
+            p = st.text_input("Choose a password", type="password", key="signup-pass")
+            if st.form_submit_button("Create account", use_container_width=True):
+                data, status, detail = post("/auth/register", {"user_id": u, "password": p},
+                                            quiet_errors=(409, 400))
+                if data:
+                    st.session_state.user_id = data["user_id"]
+                    st.session_state.viewed_items = set()
+                    st.rerun()
+                elif status == 409:
+                    st.error(f"'{u}' is already taken.")
+                elif status == 400:
+                    st.error("Username and password are both required.")
+
+
+def render_cart_popover(cart):
+    """No st.columns here: this renders inside a popover that's already
+    nested inside the header's own columns, and Streamlit only allows one
+    level of column nesting -- adding another raises StreamlitAPIException.
+    Title/price and the remove button just stack instead of sitting side by
+    side."""
+    if not cart or not cart["items"]:
+        st.caption("Your cart is empty.")
+        return
+    for it in cart["items"]:
+        price = f" · ${it['price']:.2f}" if it.get("price") else ""
+        title = (it.get("title") or it.get("item_id") or "")[:45]
+        st.markdown(f"<b>{title}</b>{price}", unsafe_allow_html=True)
+        if st.button("✕ Remove", key=f"cart-rm-{it['item_id']}"):
+            cart_remove(it["item_id"])
+            st.rerun()
+
+
 # ---------------------------------------------------------------- header
-head_l, head_c, head_r = st.columns([2, 3, 2])
+head_l, head_c, head_r = st.columns([2, 3, 2.6])
 with head_l:
     st.markdown('<div class="ep-wordmark">Electro<span>Picks</span></div>', unsafe_allow_html=True)
 with head_c:
@@ -242,9 +344,24 @@ with head_c:
         "Search", "", placeholder="Search the current results…", label_visibility="collapsed"
     )
 with head_r:
-    user_id = st.text_input(
-        "Log in", "", placeholder="Log in (user_id)", label_visibility="collapsed"
-    )
+    if st.session_state.user_id:
+        cart_col, user_col = st.columns(2)
+        with cart_col:
+            cart_data = get(f"/cart/{st.session_state.user_id}")
+            n_cart = len(cart_data["items"]) if cart_data else 0
+            with st.popover(f"🛒 Cart ({n_cart})" if n_cart else "🛒 Cart", use_container_width=True):
+                render_cart_popover(cart_data)
+        with user_col:
+            uid_short = st.session_state.user_id[:12] + ("…" if len(st.session_state.user_id) > 12 else "")
+            with st.popover(f"👤 {uid_short}", use_container_width=True):
+                st.write(f"Logged in as **{st.session_state.user_id}**")
+                if st.button("Log out", use_container_width=True):
+                    st.session_state.user_id = None
+                    st.session_state.selected_item = None
+                    st.rerun()
+    else:
+        with st.popover("Log in / Sign up", use_container_width=True):
+            render_auth_popover()
 
 st.divider()
 
@@ -253,10 +370,14 @@ with st.sidebar:
     st.caption("A recsys demo: different pages, different models — on purpose.")
     temp = st.slider("Diversity (temperature)", 0.0, 3.0, 1.0, 0.1)
     st.caption("Results resample as you adjust this — the API applies temperature sampling server-side.")
-    if user_id:
-        st.success(f"Browsing as `{user_id}`")
+    if st.session_state.user_id:
+        st.success(f"Browsing as `{st.session_state.user_id}`")
+        st.caption("Clicking, liking, and adding items to your cart all feed back into your "
+                  "recommendations on the next page load — no retraining, the model just reads "
+                  "your latest activity fresh every time.")
     else:
-        st.info("Logged out — showing trending items to everyone.")
+        st.info("Logged out — showing trending items to everyone. Log in (or sign up) to get "
+               "recommendations that adapt to what you click, like, and add to cart.")
 
 # ---------------------------------------------------------------- card renderers
 def _filter(items, query):
@@ -349,6 +470,7 @@ def render_detail_panel():
     item_id = st.session_state.selected_item
     if not item_id:
         return
+    log_view(item_id)   # counts as behavioral signal -- see log_view's docstring
     it = st.session_state.item_cache.get(item_id, {"item_id": item_id})
     title = it.get("title") or item_id
     meta = " · ".join(filter(None, [it.get("category"), it.get("brand")]))
@@ -376,9 +498,25 @@ def render_detail_panel():
         f'</div></div>'
     )
     st.markdown(detail_html, unsafe_allow_html=True)
-    if st.button("✕ Close", key="close-detail"):
-        st.session_state.selected_item = None
-        st.rerun()
+
+    close_col, like_col, cart_col = st.columns([1, 1, 1.4])
+    with close_col:
+        if st.button("✕ Close", key="close-detail"):
+            st.session_state.selected_item = None
+            st.rerun()
+    if st.session_state.user_id:
+        with like_col:
+            if st.button("♡ Like", key=f"like-{item_id}"):
+                like_item(item_id)
+                st.toast("Liked — your recommendations will reflect this now.", icon="❤️")
+                st.rerun()   # header (incl. the Cart popover) renders earlier in the script
+        with cart_col:                                     # than this handler on THIS pass, so
+            if st.button("🛒 Add to cart", key=f"cart-{item_id}"):  # it'd otherwise show pre-click
+                cart_add(item_id)                           # state until some other rerun happened
+                st.toast("Added to cart.", icon="🛒")
+                st.rerun()
+    else:
+        st.caption("Log in to like items or add them to your cart.")
 
     st.markdown("**Similar items**")
     sim = get(f"/similar/{item_id}?n=10")
@@ -390,7 +528,7 @@ def render_detail_panel():
 if st.session_state.selected_item:
     render_detail_panel()
 
-if not user_id:
+if not st.session_state.user_id:
     st.markdown('<div class="ep-section-title">Trending electronics</div>', unsafe_allow_html=True)
     data = get("/popular?n=20")
     if data:
@@ -398,12 +536,12 @@ if not user_id:
         render_grid(data["items"], data["model_label"], key_prefix="pop")
 else:
     st.markdown('<div class="ep-section-title">For you</div>', unsafe_allow_html=True)
-    data = get(f"/recommend/{user_id}?n=20&temperature={temp}")
+    data = get(f"/recommend/{st.session_state.user_id}?n=20&temperature={temp}")
     if data:
         model_caption(data["model_label"], data["latency_ms"])
         render_grid(data["items"], data["model_label"], key_prefix="rec")
 
-    byl = get(f"/because-you-liked/{user_id}?n=10")
+    byl = get(f"/because-you-liked/{st.session_state.user_id}?n=10")
     if byl:
         seed_id = (byl.get("latency_ms") or {}).get("seed_item")
         seed_item = st.session_state.item_cache.get(seed_id) if seed_id else None

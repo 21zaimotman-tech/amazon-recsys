@@ -22,6 +22,19 @@ CREATE TABLE IF NOT EXISTS interactions (
 CREATE INDEX IF NOT EXISTS idx_inter_user ON interactions(user_id, ts DESC);
 
 CREATE TABLE IF NOT EXISTS users (
-    user_id   TEXT PRIMARY KEY,
-    n_interactions INT
+    user_id        TEXT PRIMARY KEY,
+    password_hash  TEXT NOT NULL,
+    password_salt  TEXT NOT NULL,
+    n_interactions INT NOT NULL DEFAULT 0,
+    created_at     TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+-- persistent cart, separate from the interaction-log signal below (a user's
+-- cart is what they intend to buy right now; interactions are the full
+-- engagement history the model reads at serving time)
+CREATE TABLE IF NOT EXISTS cart (
+    user_id  TEXT REFERENCES users(user_id) ON DELETE CASCADE,
+    item_id  TEXT REFERENCES items(item_id),
+    added_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (user_id, item_id)
 );

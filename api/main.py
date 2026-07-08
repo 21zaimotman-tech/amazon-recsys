@@ -1,10 +1,14 @@
 """FastAPI service. Loads models + FAISS at startup, serves recommendations.
 Swagger UI at /docs (required by the brief)."""
 import time
+import psycopg2.errors
 from fastapi import FastAPI, HTTPException
-from .db import get_conn, fetch_user_history, fetch_items
+from .db import (get_conn, fetch_user_history, fetch_items, create_user, get_user,
+                 log_event, add_to_cart, remove_from_cart, get_cart)
+from .auth import hash_password, verify_password
 from .recommender import Recommender
-from .schemas import RecResponse, Item
+from .schemas import (RecResponse, Item, RegisterRequest, LoginRequest, AuthResponse,
+                      CartResponse)
 
 app = FastAPI(title="Electronics RecSys API", version="0.1.0")
 rec = Recommender()                  # loads artifacts once at startup
@@ -83,3 +87,78 @@ def because_you_liked(user_id: str, n: int = 10):
         conn.close()
     return RecResponse(model_label=label, items=items,
                        latency_ms={"total": (time.perf_counter() - t0) * 1e3, "seed_item": seed})
+
+
+# ---------------------------------------------------------------- accounts
+@app.post("/auth/register", response_model=AuthResponse, status_code=201)
+def register(body: RegisterRequest):
+    if not body.user_id.strip() or not body.password:
+        raise HTTPException(400, "user_id and password are required")
+    password_hash, password_salt = hash_password(body.password)
+    conn = get_conn()
+    try:
+        create_user(conn, body.user_id, password_hash, password_salt)
+    except psycopg2.errors.UniqueViolation:
+        raise HTTPException(409, f"user_id '{body.user_id}' is already taken")
+    finally:
+        conn.close()
+    return AuthResponse(user_id=body.user_id, n_interactions=0)
+
+
+@app.post("/auth/login", response_model=AuthResponse)
+def login(body: LoginRequest):
+    conn = get_conn()
+    try:
+        user = get_user(conn, body.user_id)
+    finally:
+        conn.close()
+    if not user or not verify_password(body.password, user["password_hash"], user["password_salt"]):
+        raise HTTPException(401, "invalid user_id or password")
+    return AuthResponse(user_id=user["user_id"], n_interactions=user["n_interactions"])
+
+
+# ---------------------------------------------------------------- behavior events + cart
+@app.post("/events/{user_id}/{item_id}")
+def record_event(user_id: str, item_id: str, event_type: str = "view"):
+    """Logs a view/like/cart-add as a real interaction row -- the very next
+    /recommend call for this user re-reads history fresh from Postgres, so
+    this is what makes recommendations change from live behavior without
+    retraining anything (see api/db.py log_event's docstring)."""
+    if event_type not in ("view", "like", "cart"):
+        raise HTTPException(400, "event_type must be one of: view, like, cart")
+    conn = get_conn()
+    try:
+        log_event(conn, user_id, item_id, event_type)
+    finally:
+        conn.close()
+    return {"status": "ok"}
+
+
+@app.post("/cart/{user_id}/{item_id}")
+def cart_add(user_id: str, item_id: str):
+    conn = get_conn()
+    try:
+        add_to_cart(conn, user_id, item_id)
+    finally:
+        conn.close()
+    return {"status": "ok"}
+
+
+@app.delete("/cart/{user_id}/{item_id}")
+def cart_remove(user_id: str, item_id: str):
+    conn = get_conn()
+    try:
+        remove_from_cart(conn, user_id, item_id)
+    finally:
+        conn.close()
+    return {"status": "ok"}
+
+
+@app.get("/cart/{user_id}", response_model=CartResponse)
+def cart_view(user_id: str):
+    conn = get_conn()
+    try:
+        items = get_cart(conn, user_id)
+    finally:
+        conn.close()
+    return CartResponse(items=[Item(**it) for it in items])
