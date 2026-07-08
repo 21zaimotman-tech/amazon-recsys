@@ -8,6 +8,7 @@ artifacts/*.pt
 artifacts/*.pkl
 artifacts/*.json
 .env
+.claude/
 docker-compose.override.yml
 .ipynb_checkpoints/
 .vscode/
