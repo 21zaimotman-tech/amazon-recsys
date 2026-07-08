@@ -6,17 +6,27 @@ stack, all running with `docker compose up`. Dataset: Amazon Reviews 2023,
 
 > _Add a GIF of the webapp in action here._
 
-## Results (fill in after training)
+## Results
+
+Measured on a local sample of 131,154 interactions / 15,038 users / 9,487 items (5-core
+filtered; smaller than the brief's full 5M-interaction target — see `ANALYSIS.md` §6 for what
+that means for these numbers).
 
 | Method | Recall@20 | Recall@50 | NDCG@10 | Coverage |
 |--------|-----------|-----------|---------|----------|
-| Random | | | | |
-| Popularity | | | | |
-| MF-BPR | | | | |
-| Two-tower | | | | |
-| Two-tower + LightGBM | | | | |
+| Random | 0.0024 | 0.0049 | 0.0007 | 1.0000 |
+| Popularity | 0.0175 | 0.0499 | 0.0071 | 0.0066 |
+| MF-BPR | 0.0025 | 0.0051 | 0.0007 | 1.0000 |
+| Two-tower | 0.0052 | 0.0104 | 0.0026 | 0.9975 |
+| Two-tower + LightGBM | 0.0100 | 0.0140 | 0.0043 | 0.9907 |
 
-**Average API response time:** _XX ms_ (see ANALYSIS.md for the per-component breakdown).
+Each stage beats the one before it on every metric (Two-tower > MF-BPR, +LightGBM > Two-tower
+alone) — Popularity still wins on raw Recall/NDCG at this sample size (a real, discussed
+finding, not a bug — see `ANALYSIS.md` §1), but every learned method reaches 99%+ Coverage
+against Popularity's 0.66%, the accuracy/diversity trade-off the brief asks for.
+
+**Average API response time:** ~47ms mean / ~54ms p95 end-to-end (LightGBM re-ranking is 84%
+of that — see `ANALYSIS.md` §5 for the full per-component breakdown).
 
 ## Architecture
 
