@@ -30,6 +30,20 @@ def fetch_items(conn, item_ids):
         return {r["item_id"]: dict(r) for r in cur.fetchall()}
 
 
+def search_items(conn, query, limit=20):
+    """Full-catalog search by title/brand/category substring -- distinct from
+    the frontend's old client-side filter, which only ever searched whatever
+    ~20 items happened to already be on the page."""
+    like = f"%{query}%"
+    with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+        cur.execute(
+            "SELECT item_id, title, image_url, category, brand, price FROM items "
+            "WHERE title ILIKE %s OR brand ILIKE %s OR category ILIKE %s "
+            "ORDER BY avg_rating DESC NULLS LAST LIMIT %s",
+            (like, like, like, limit))
+        return [dict(r) for r in cur.fetchall()]
+
+
 # ---------------------------------------------------------------- accounts
 def create_user(conn, user_id, password_hash, password_salt):
     """Raises psycopg2.errors.UniqueViolation if user_id is already taken --

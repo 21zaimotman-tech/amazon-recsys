@@ -10,6 +10,7 @@ Visual/UX layer only — every API call and the get() error-handling pattern
 below is unchanged from the original. No new backend endpoints.
 """
 import os
+from urllib.parse import quote
 import requests
 import streamlit as st
 
@@ -160,6 +161,32 @@ div[data-testid="stColumn"] div[data-testid="stButton"] button {
     transition: opacity 150ms ease;
 }
 div[data-testid="stColumn"]:hover .ep-card-hint { opacity: 1; }
+
+/* Quick "add to cart" button on each card: a real, VISIBLE button in a
+   small bottom-right corner zone with a higher z-index (6) than the
+   full-card "view details" overlay (5) above, so a click there is
+   captured by this button instead of falling through to the card-wide
+   one. Selectors here stack one extra attribute qualifier on top of the
+   general column/button rules above specifically so they win on
+   specificity regardless of source order (both use !important). */
+div[data-testid="stColumn"] div[data-testid="stElementContainer"][class*="st-key-cardcart-"] {
+    position: absolute !important; z-index: 6 !important;
+    top: auto !important; left: auto !important; right: 10px !important; bottom: 10px !important;
+    width: 36px !important; height: 36px !important; margin: 0 !important;
+}
+div[data-testid="stColumn"] div[data-testid="stElementContainer"][class*="st-key-cardcart-"]
+    div[data-testid="stButton"] {
+    position: static !important; width: 36px !important; height: 36px !important;
+}
+div[data-testid="stColumn"] div[data-testid="stElementContainer"][class*="st-key-cardcart-"]
+    div[data-testid="stButton"] button {
+    opacity: 1 !important; width: 36px !important; height: 36px !important;
+    border-radius: 50% !important; background: #2563EB !important; color: #FFFFFF !important;
+    border: none !important; font-size: 1rem !important; padding: 0 !important;
+    box-shadow: 0 2px 6px rgba(37,99,235,0.45);
+}
+div[data-testid="stColumn"] div[data-testid="stElementContainer"][class*="st-key-cardcart-"]
+    div[data-testid="stButton"] button:hover { background: #1D4ED8 !important; }
 
 /* ---- horizontal scroll rows (Because you liked / Similar items) ---- */
 div[class*="st-key-hscroll-"] div[data-testid="stHorizontalBlock"] {
@@ -380,13 +407,6 @@ with st.sidebar:
                "recommendations that adapt to what you click, like, and add to cart.")
 
 # ---------------------------------------------------------------- card renderers
-def _filter(items, query):
-    if not query:
-        return items
-    q = query.lower()
-    return [it for it in items if q in (it.get("title") or it.get("item_id") or "").lower()]
-
-
 def _select_item(item_id):
     st.session_state.selected_item = item_id
     st.rerun()
@@ -399,9 +419,9 @@ def render_grid(items, model_label, key_prefix, cols_n=5):
     label -- opens the detail panel. Raw HTML can't trigger a Python
     callback, so the click target has to stay a real Streamlit widget."""
     cache_items(items)
-    shown = _filter(items, search_query)
+    shown = items
     if not shown:
-        st.caption("No results match your search.")
+        st.caption("No results to show.")
         return
     tint_bg, tint_fg = _category_tint(model_label)
     rows = [shown[i:i + cols_n] for i in range(0, len(shown), cols_n)]
@@ -427,6 +447,11 @@ def render_grid(items, model_label, key_prefix, cols_n=5):
                 st.markdown(card_html, unsafe_allow_html=True)
                 if st.button("View", key=f"{key_prefix}-{it['item_id']}"):
                     _select_item(it["item_id"])
+                if st.session_state.user_id:
+                    if st.button("🛒", key=f"cardcart-{key_prefix}-{it['item_id']}", help="Add to cart"):
+                        cart_add(it["item_id"])
+                        st.toast("Added to cart.", icon="🛒")
+                        st.rerun()
 
 
 def render_hscroll(items, key_prefix, empty_caption="Nothing to show yet.", cols_n=7):
@@ -528,7 +553,20 @@ def render_detail_panel():
 if st.session_state.selected_item:
     render_detail_panel()
 
-if not st.session_state.user_id:
+if search_query.strip():
+    # Real catalog search (all 9,487 items via GET /search), not a filter of
+    # whatever ~20 items happened to already be on the page -- a term that
+    # exists in the catalog but not in today's recommendations should still
+    # find something.
+    st.markdown(f'<div class="ep-section-title">Search results for &quot;{search_query}&quot;</div>',
+               unsafe_allow_html=True)
+    data = get(f"/search?q={quote(search_query.strip())}&n=24")
+    if data:
+        if not data["items"]:
+            st.caption("No items match your search.")
+        else:
+            render_grid(data["items"], "Search", key_prefix="search")
+elif not st.session_state.user_id:
     st.markdown('<div class="ep-section-title">Trending electronics</div>', unsafe_allow_html=True)
     data = get("/popular?n=20")
     if data:

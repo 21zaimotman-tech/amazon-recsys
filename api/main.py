@@ -3,8 +3,8 @@ Swagger UI at /docs (required by the brief)."""
 import time
 import psycopg2.errors
 from fastapi import FastAPI, HTTPException
-from .db import (get_conn, fetch_user_history, fetch_items, create_user, get_user,
-                 log_event, add_to_cart, remove_from_cart, get_cart)
+from .db import (get_conn, fetch_user_history, fetch_items, search_items, create_user,
+                 get_user, log_event, add_to_cart, remove_from_cart, get_cart)
 from .auth import hash_password, verify_password
 from .recommender import Recommender
 from .schemas import (RecResponse, Item, RegisterRequest, LoginRequest, AuthResponse,
@@ -87,6 +87,21 @@ def because_you_liked(user_id: str, n: int = 10):
         conn.close()
     return RecResponse(model_label=label, items=items,
                        latency_ms={"total": (time.perf_counter() - t0) * 1e3, "seed_item": seed})
+
+
+@app.get("/search", response_model=RecResponse)
+def search(q: str, n: int = 20):
+    """Full-catalog search (title/brand/category) -- distinct from the
+    frontend's per-page filter, which only ever searches whatever's already
+    loaded. Not a recommendation, so model_label says so plainly."""
+    t0 = time.perf_counter()
+    conn = get_conn()
+    try:
+        rows = search_items(conn, q, limit=n)
+    finally:
+        conn.close()
+    return RecResponse(model_label=f'Search results for "{q}"', items=[Item(**r) for r in rows],
+                       latency_ms={"total": (time.perf_counter() - t0) * 1e3})
 
 
 # ---------------------------------------------------------------- accounts
