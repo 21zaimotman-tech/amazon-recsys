@@ -1,6 +1,6 @@
 # Notebook / training environment (Colab). The webapp services have their own.
 datasets==2.20.0
-pandas==2.2.2
+pandas
 numpy==1.26.4
 pyarrow==16.1.0
 torch==2.3.1
