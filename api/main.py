@@ -5,11 +5,11 @@ import psycopg2.errors
 from fastapi import FastAPI, HTTPException
 from .db import (get_conn, fetch_user_history, fetch_items, search_items, create_user,
                  get_user, log_event, add_to_cart, remove_from_cart, get_cart, checkout,
-                 add_to_wishlist, remove_from_wishlist, get_wishlist)
+                 add_to_wishlist, remove_from_wishlist, get_wishlist, get_orders)
 from .auth import hash_password, verify_password
 from .recommender import Recommender
 from .schemas import (RecResponse, Item, RegisterRequest, LoginRequest, AuthResponse,
-                      CartResponse)
+                      CartResponse, OrderItem, OrdersResponse)
 
 app = FastAPI(title="Electronics RecSys API", version="0.1.0")
 rec = Recommender()                  # loads artifacts once at startup
@@ -221,3 +221,16 @@ def wishlist_view(user_id: str):
     finally:
         conn.close()
     return CartResponse(items=[Item(**it) for it in items])
+
+
+# ---------------------------------------------------------------- order history
+@app.get("/orders/{user_id}", response_model=OrdersResponse)
+def orders_view(user_id: str):
+    conn = get_conn()
+    try:
+        rows = get_orders(conn, user_id)
+    finally:
+        conn.close()
+    for r in rows:
+        r["purchased_at"] = str(r["purchased_at"])
+    return OrdersResponse(items=[OrderItem(**r) for r in rows])

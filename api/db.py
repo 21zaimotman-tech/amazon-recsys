@@ -25,7 +25,7 @@ def fetch_items(conn, item_ids):
     if not item_ids:
         return {}
     with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-        cur.execute("SELECT item_id, title, image_url, category, brand, price "
+        cur.execute("SELECT item_id, title, image_url, category, brand, price, avg_rating "
                     "FROM items WHERE item_id = ANY(%s)", (list(item_ids),))
         return {r["item_id"]: dict(r) for r in cur.fetchall()}
 
@@ -37,7 +37,7 @@ def search_items(conn, query, limit=20):
     like = f"%{query}%"
     with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
         cur.execute(
-            "SELECT item_id, title, image_url, category, brand, price FROM items "
+            "SELECT item_id, title, image_url, category, brand, price, avg_rating FROM items "
             "WHERE title ILIKE %s OR brand ILIKE %s OR category ILIKE %s "
             "ORDER BY avg_rating DESC NULLS LAST LIMIT %s",
             (like, like, like, limit))
@@ -108,23 +108,38 @@ def remove_from_cart(conn, user_id, item_id):
 def get_cart(conn, user_id):
     with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
         cur.execute(
-            "SELECT i.item_id, i.title, i.image_url, i.category, i.brand, i.price "
+            "SELECT i.item_id, i.title, i.image_url, i.category, i.brand, i.price, i.avg_rating "
             "FROM cart c JOIN items i ON i.item_id = c.item_id "
             "WHERE c.user_id=%s ORDER BY c.added_at DESC", (user_id,))
         return [dict(r) for r in cur.fetchall()]
 
 
 def checkout(conn, user_id):
-    """'Buy Now': logs every cart item as a purchase (the strongest positive
-    signal) and empties the cart. No real payment processing -- this is a
-    demo -- but the behavioral feedback loop into /recommend is real."""
+    """'Buy Now': writes a permanent orders row per cart item (order history --
+    never deleted, unlike cart), logs each as a "purchase" interaction (the
+    strongest positive signal, feeding straight into the next /recommend
+    call), and empties the cart. No real payment processing -- this is a
+    demo -- but the behavioral feedback loop and the order history are real."""
     items = get_cart(conn, user_id)
-    for it in items:
-        log_event(conn, user_id, it["item_id"], "purchase")
     with conn.cursor() as cur:
+        for it in items:
+            cur.execute(
+                "INSERT INTO orders (user_id, item_id, price) VALUES (%s,%s,%s)",
+                (user_id, it["item_id"], it.get("price")))
         cur.execute("DELETE FROM cart WHERE user_id=%s", (user_id,))
     conn.commit()
+    for it in items:
+        log_event(conn, user_id, it["item_id"], "purchase")
     return items
+
+
+def get_orders(conn, user_id):
+    with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+        cur.execute(
+            "SELECT o.item_id, o.price, o.purchased_at, i.title, i.image_url, i.category, i.brand, i.avg_rating "
+            "FROM orders o JOIN items i ON i.item_id = o.item_id "
+            "WHERE o.user_id=%s ORDER BY o.purchased_at DESC", (user_id,))
+        return [dict(r) for r in cur.fetchall()]
 
 
 # ---------------------------------------------------------------- wishlist
@@ -146,7 +161,7 @@ def remove_from_wishlist(conn, user_id, item_id):
 def get_wishlist(conn, user_id):
     with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
         cur.execute(
-            "SELECT i.item_id, i.title, i.image_url, i.category, i.brand, i.price "
+            "SELECT i.item_id, i.title, i.image_url, i.category, i.brand, i.price, i.avg_rating "
             "FROM wishlist w JOIN items i ON i.item_id = w.item_id "
             "WHERE w.user_id=%s ORDER BY w.added_at DESC", (user_id,))
         return [dict(r) for r in cur.fetchall()]

@@ -39,11 +39,25 @@ CREATE TABLE IF NOT EXISTS cart (
     PRIMARY KEY (user_id, item_id)
 );
 
--- "save for later", distinct from cart (intent to buy now) and from a Like
--- (a one-off feedback signal, not a browsable list)
+-- "save for later" / liked items, distinct from cart (intent to buy now).
+-- Liking an item both logs a "like" interaction event AND adds it here --
+-- one user action, one place to browse it back.
 CREATE TABLE IF NOT EXISTS wishlist (
     user_id  TEXT REFERENCES users(user_id) ON DELETE CASCADE,
     item_id  TEXT REFERENCES items(item_id),
     added_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     PRIMARY KEY (user_id, item_id)
 );
+
+-- permanent purchase record, written at checkout ("Buy now") and never
+-- deleted -- unlike cart (current intent, cleared on checkout) this is the
+-- user's order history. No primary key on (user_id,item_id): the same item
+-- can be bought more than once, each a separate row/order.
+CREATE TABLE IF NOT EXISTS orders (
+    order_id      SERIAL PRIMARY KEY,
+    user_id       TEXT REFERENCES users(user_id) ON DELETE CASCADE,
+    item_id       TEXT REFERENCES items(item_id),
+    price         REAL,             -- price at purchase time, not looked up later
+    purchased_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_orders_user ON orders(user_id, purchased_at DESC);

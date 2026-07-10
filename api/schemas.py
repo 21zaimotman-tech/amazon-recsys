@@ -8,6 +8,7 @@ class Item(BaseModel):
     category: Optional[str] = None
     brand: Optional[str] = None
     price: Optional[float] = None
+    avg_rating: Optional[float] = None
 
 class RecResponse(BaseModel):
     model_label: str                 # which model produced these (shown in UI)
@@ -32,3 +33,11 @@ class AuthResponse(BaseModel):
 
 class CartResponse(BaseModel):
     items: List[Item]
+
+
+class OrderItem(Item):
+    purchased_at: Optional[str] = None
+
+
+class OrdersResponse(BaseModel):
+    items: List[OrderItem]
