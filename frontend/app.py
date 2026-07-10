@@ -13,6 +13,7 @@ import os
 from urllib.parse import quote
 import requests
 import streamlit as st
+from streamlit_searchbox import st_searchbox
 
 API = os.getenv("API_URL", "http://api:8000")
 st.set_page_config(page_title="ElectroPicks", page_icon="⚡", layout="wide")
@@ -289,11 +290,21 @@ if "pending_action" not in st.session_state:
     st.session_state.pending_action = None      # {"type": "wishlist"|"cart"|"buy", "item_id": ...}
                                                  # set when a logged-out user clicks an action button --
                                                  # replayed automatically right after they log in.
+if "search_query" not in st.session_state:
+    st.session_state.search_query = ""          # committed full-catalog search (see the header's
+                                                 # st_searchbox -> "See all results" suggestion)
+if "_last_search_selection" not in st.session_state:
+    st.session_state._last_search_selection = None
 
 
 def _goto(page):
     st.session_state.page = page
     st.session_state.selected_item = None
+    st.rerun()
+
+
+def _select_item(item_id):
+    st.session_state.selected_item = item_id
     st.rerun()
 
 
@@ -374,6 +385,30 @@ def delete(path):
 def _latency_ms_text(latency_ms: dict) -> str:
     total = (latency_ms or {}).get("total")
     return f"{total:.0f}ms" if isinstance(total, (int, float)) else "—"
+
+
+def _search_suggest(searchterm):
+    """Callback for the header's live search box (streamlit-searchbox).
+    Unlike a plain st.text_input -- which, as of Streamlit 1.36+, only
+    commits its value and reruns the script on Enter/blur, not on every
+    keystroke ("Press Enter to apply") -- this component calls back into
+    Python on a debounced timer as the user types, with no Enter needed, so
+    suggestions genuinely appear automatically. Returns (label, value)
+    pairs: picking an item jumps straight to its detail panel; picking the
+    trailing "See all results" entry runs the full catalog-grid search."""
+    term = (searchterm or "").strip()
+    if len(term) < 2:
+        return []
+    try:
+        r = requests.get(f"{API}/search", params={"q": term, "n": 8}, timeout=5)
+        r.raise_for_status()
+        items = r.json()["items"]
+    except Exception:
+        return []
+    cache_items(items)
+    options = [(it.get("title") or it.get("item_id"), ("item", it["item_id"])) for it in items]
+    options.append((f'\U0001F50E See all results for "{term}"', ("query", term)))
+    return options
 
 
 # ---------------------------------------------------------------- accounts + events
@@ -618,15 +653,32 @@ with head_l:
     st.markdown('<div class="ep-wordmark">Electro<span>Picks</span></div>', unsafe_allow_html=True)
     # Invisible full-column button, same overlay technique as product cards
     # (see the stColumn/stButton CSS above) -- clicking the logo area resets
-    # to the home page: clears the open detail panel and the search box.
+    # to the home page: clears the open detail panel and the committed
+    # search (the search box's own leftover text is harmless -- only
+    # search_query controls whether the results section renders).
     if st.button("Home", key="cardview-home-nav"):
-        st.session_state["search_box"] = ""
+        st.session_state.search_query = ""
         _goto("home")
 with head_c:
-    search_query = st.text_input(
-        "Search", "", placeholder="Search the whole catalog…", label_visibility="collapsed",
+    _selection = st_searchbox(
+        _search_suggest,
         key="search_box",
+        placeholder="Search the whole catalog…",
+        clear_on_submit=True,
+        label="Search",
     )
+    # st_searchbox keeps returning the same selected value on every rerun
+    # until the user picks something new -- without this guard, acting on
+    # it here would re-trigger _select_item()/rerun() forever.
+    if _selection and _selection != st.session_state._last_search_selection:
+        st.session_state._last_search_selection = _selection
+        _kind, _value = _selection
+        if _kind == "item":
+            _select_item(_value)
+        else:
+            st.session_state.search_query = _value
+            st.rerun()
+search_query = st.session_state.search_query
 with head_r:
     if st.session_state.user_id:
         wish_col, cart_col, orders_col, user_col = st.columns(4)
@@ -692,11 +744,6 @@ with st.sidebar:
                "recommendations that adapt to what you click, like, and add to cart.")
 
 # ---------------------------------------------------------------- card renderers
-def _select_item(item_id):
-    st.session_state.selected_item = item_id
-    st.rerun()
-
-
 def render_grid(items, model_label, key_prefix, cols_n=5):
     """Interactive product grid: each card is pure HTML/CSS, with a real but
     invisible Streamlit button layered on top of the whole column (see the
