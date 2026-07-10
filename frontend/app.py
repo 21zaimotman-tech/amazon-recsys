@@ -421,15 +421,21 @@ def _item_media_html(it, css_class="ep-card-placeholder", size_style=""):
     return f'<div class="{css_class}" style="{size_style}background:{bg};">{icon}</div>'
 
 
-def render_auth_popover():
+def render_auth_popover(key_suffix=""):
+    """key_suffix keeps widget keys unique across call sites -- Streamlit
+    renders st.popover content on every rerun regardless of whether the
+    popover is open (only visibility is toggled client-side), and now this
+    is called both from the header popover AND the inline login banner
+    (see _require_login) when both happen to be present on the same run, so
+    two calls with identical keys would collide (duplicate st.form key)."""
     pa = st.session_state.pending_action
     if pa:
         st.info(f"Log in or sign up to {_ACTION_LABEL.get(pa['type'], 'continue')}.")
     tab_login, tab_signup = st.tabs(["Log in", "Sign up"])
     with tab_login:
-        with st.form("login-form", border=False):
-            u = st.text_input("Username", key="login-user")
-            p = st.text_input("Password", type="password", key="login-pass")
+        with st.form(f"login-form{key_suffix}", border=False):
+            u = st.text_input("Username", key=f"login-user{key_suffix}")
+            p = st.text_input("Password", type="password", key=f"login-pass{key_suffix}")
             if st.form_submit_button("Log in", use_container_width=True):
                 data, status, detail = post("/auth/login", {"user_id": u, "password": p},
                                             quiet_errors=(401,))
@@ -442,9 +448,9 @@ def render_auth_popover():
                 elif status == 401:
                     st.error("Wrong username or password.")
     with tab_signup:
-        with st.form("signup-form", border=False):
-            u = st.text_input("Choose a username", key="signup-user")
-            p = st.text_input("Choose a password", type="password", key="signup-pass")
+        with st.form(f"signup-form{key_suffix}", border=False):
+            u = st.text_input("Choose a username", key=f"signup-user{key_suffix}")
+            p = st.text_input("Choose a password", type="password", key=f"signup-pass{key_suffix}")
             if st.form_submit_button("Create account", use_container_width=True):
                 data, status, detail = post("/auth/register", {"user_id": u, "password": p},
                                             quiet_errors=(409, 400))
@@ -612,7 +618,7 @@ with head_r:
                     st.rerun()
     else:
         with st.popover("Log in / Sign up", use_container_width=True):
-            render_auth_popover()
+            render_auth_popover(key_suffix="-header")
 
 st.divider()
 
@@ -623,7 +629,7 @@ st.divider()
 # action automatically (render_auth_popover -> _run_pending_action).
 if st.session_state.pending_action and not st.session_state.user_id:
     with st.container(border=True):
-        render_auth_popover()
+        render_auth_popover(key_suffix="-banner")
 
 with st.sidebar:
     st.markdown("### ElectroPicks")
