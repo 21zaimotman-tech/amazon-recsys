@@ -269,6 +269,10 @@ if "viewed_items" not in st.session_state:
     st.session_state.viewed_items = set()       # de-dupes "view" event logging per browser session
 if "page" not in st.session_state:
     st.session_state.page = "home"              # "home" | "wishlist" | "cart" | "orders"
+if "pending_action" not in st.session_state:
+    st.session_state.pending_action = None      # {"type": "wishlist"|"cart"|"buy", "item_id": ...}
+                                                 # set when a logged-out user clicks an action button --
+                                                 # replayed automatically right after they log in.
 
 
 def _goto(page):
@@ -360,6 +364,43 @@ def checkout():
     return data
 
 
+_ACTION_LABEL = {
+    "wishlist": "save this to your wishlist",
+    "cart": "add this to your cart",
+    "buy": "buy this item",
+}
+
+
+def _require_login(action_type, item_id):
+    """Wishlist/Add to cart/Buy stay visible even logged out -- clicking one
+    without an account queues the action and reruns straight into the login
+    prompt (see the banner right after the header) instead of just hiding
+    the buttons behind a caption. render_auth_popover() replays the queued
+    action the moment login/signup succeeds."""
+    st.session_state.pending_action = {"type": action_type, "item_id": item_id}
+    st.rerun()
+
+
+def _run_pending_action():
+    pa = st.session_state.pending_action
+    if not pa:
+        return
+    item_id = pa["item_id"]
+    if pa["type"] == "wishlist":
+        wishlist_add(item_id)
+        st.toast("Saved to wishlist — your recommendations will reflect this now.", icon="⭐")
+    elif pa["type"] == "cart":
+        cart_add(item_id)
+        st.toast("Added to cart.", icon="🛒")
+    elif pa["type"] == "buy":
+        cart_add(item_id)
+        bought = checkout()
+        if bought:
+            st.toast(f"Order placed — {len(bought['items'])} item(s). Thanks!", icon="✅")
+            st.session_state.page = "orders"
+    st.session_state.pending_action = None
+
+
 def _item_media_html(it, css_class="ep-card-placeholder", size_style=""):
     if it.get("image_url"):
         return f'<img class="{css_class}" style="{size_style}" src="{it["image_url"]}" />'
@@ -369,6 +410,9 @@ def _item_media_html(it, css_class="ep-card-placeholder", size_style=""):
 
 
 def render_auth_popover():
+    pa = st.session_state.pending_action
+    if pa:
+        st.info(f"Log in or sign up to {_ACTION_LABEL.get(pa['type'], 'continue')}.")
     tab_login, tab_signup = st.tabs(["Log in", "Sign up"])
     with tab_login:
         with st.form("login-form", border=False):
@@ -381,6 +425,7 @@ def render_auth_popover():
                     st.session_state.user_id = data["user_id"]
                     st.session_state.viewed_items = set()
                     st.session_state.page = "home"
+                    _run_pending_action()
                     st.rerun()
                 elif status == 401:
                     st.error("Wrong username or password.")
@@ -395,6 +440,7 @@ def render_auth_popover():
                     st.session_state.user_id = data["user_id"]
                     st.session_state.viewed_items = set()
                     st.session_state.page = "home"
+                    _run_pending_action()
                     st.rerun()
                 elif status == 409:
                     st.error(f"'{u}' is already taken.")
@@ -558,6 +604,15 @@ with head_r:
 
 st.divider()
 
+# Wishlist/Add to cart/Buy stay clickable for logged-out visitors (see
+# _require_login) -- this banner is where that login actually happens,
+# right at the top of the page regardless of whether the click came from a
+# grid card or the detail panel, and login/signup here replays the queued
+# action automatically (render_auth_popover -> _run_pending_action).
+if st.session_state.pending_action and not st.session_state.user_id:
+    with st.container(border=True):
+        render_auth_popover()
+
 with st.sidebar:
     st.markdown("### ElectroPicks")
     st.caption("A recsys demo: different pages, different models — on purpose.")
@@ -618,11 +673,16 @@ def render_grid(items, model_label, key_prefix, cols_n=5):
                 st.markdown(card_html, unsafe_allow_html=True)
                 if st.button("View", key=f"cardview-{key_prefix}-{it['item_id']}"):
                     _select_item(it["item_id"])
-                if st.session_state.user_id:
-                    if st.button("🛒 Add", key=f"cardcart-{key_prefix}-{it['item_id']}", help="Add to cart"):
+                # Visible even logged out -- clicking it without an account
+                # queues the add and routes into the login banner instead of
+                # just being hidden (see _require_login).
+                if st.button("🛒 Add", key=f"cardcart-{key_prefix}-{it['item_id']}", help="Add to cart"):
+                    if st.session_state.user_id:
                         cart_add(it["item_id"])
                         st.toast("Added to cart.", icon="🛒")
                         st.rerun()
+                    else:
+                        _require_login("cart", it["item_id"])
 
 
 def render_hscroll(items, key_prefix, empty_caption="Nothing to show yet.", cols_n=7):
@@ -696,27 +756,44 @@ def render_detail_panel():
     )
     st.markdown(detail_html, unsafe_allow_html=True)
 
-    close_col, wish_col, cart_col = st.columns([1, 1.2, 1.4])
+    # Wishlist/Add to cart/Buy now stay visible even logged out -- clicking
+    # one without an account queues it and routes into the login banner
+    # right under the header instead of hiding the buttons behind a caption
+    # (see _require_login / _run_pending_action).
+    close_col, wish_col, cart_col, buy_col = st.columns([1, 1.1, 1.3, 1.2])
     with close_col:
         if st.button("✕ Close", key="close-detail"):
             st.session_state.selected_item = None
             st.rerun()
-    if st.session_state.user_id:
-        # header nav (wishlist/cart counts) renders earlier in the script
-        # than this handler on THIS pass, so it'd still show pre-click
-        # counts until the st.rerun() below re-executes top to bottom.
-        with wish_col:
-            if st.button("☆ Wishlist", key=f"wish-{item_id}"):
+    # header nav (wishlist/cart counts) renders earlier in the script than
+    # these handlers on THIS pass, so it'd still show pre-click counts
+    # until the st.rerun() below re-executes top to bottom.
+    with wish_col:
+        if st.button("☆ Wishlist", key=f"wish-{item_id}"):
+            if st.session_state.user_id:
                 wishlist_add(item_id)
                 st.toast("Saved to wishlist — your recommendations will reflect this now.", icon="⭐")
                 st.rerun()
-        with cart_col:
-            if st.button("🛒 Add to cart", key=f"cart-{item_id}"):
+            else:
+                _require_login("wishlist", item_id)
+    with cart_col:
+        if st.button("🛒 Add to cart", key=f"cart-{item_id}"):
+            if st.session_state.user_id:
                 cart_add(item_id)
                 st.toast("Added to cart.", icon="🛒")
                 st.rerun()
-    else:
-        st.caption("Log in to save or buy items.")
+            else:
+                _require_login("cart", item_id)
+    with buy_col:
+        if st.button("⚡ Buy now", key=f"buy-{item_id}"):
+            if st.session_state.user_id:
+                cart_add(item_id)
+                bought = checkout()
+                if bought:
+                    st.toast(f"Order placed — {len(bought['items'])} item(s). Thanks!", icon="✅")
+                    _goto("orders")
+            else:
+                _require_login("buy", item_id)
 
     st.markdown("**Similar items**")
     sim = get(f"/similar/{item_id}?n=10")
