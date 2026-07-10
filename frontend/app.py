@@ -277,6 +277,10 @@ if "selected_item" not in st.session_state:
     st.session_state.selected_item = None
 if "user_id" not in st.session_state:
     st.session_state.user_id = None            # set only after a real /auth/login or /auth/register
+if "session_token" not in st.session_state:
+    st.session_state.session_token = None       # "remember me" token, also stashed in the URL (?t=)
+                                                 # so a hard reload (new Streamlit session, wipes
+                                                 # session_state) can restore login -- see _restore_session
 if "viewed_items" not in st.session_state:
     st.session_state.viewed_items = set()       # de-dupes "view" event logging per browser session
 if "page" not in st.session_state:
@@ -291,6 +295,36 @@ def _goto(page):
     st.session_state.page = page
     st.session_state.selected_item = None
     st.rerun()
+
+
+def _restore_session():
+    """A hard browser reload (F5) opens a brand-new Streamlit session, which
+    wipes st.session_state -- so user_id would reset to None even though
+    the person never logged out. The URL's query string DOES survive a
+    reload, so login/signup stash a 'remember me' token there (?t=...);
+    this looks it up against the backend and silently restores the login on
+    the next run. No-op once already logged in, and fails quietly (stays
+    logged out) if the token is stale/invalid instead of showing an error
+    banner -- an expired/missing session is an expected, not exceptional,
+    outcome here."""
+    if st.session_state.user_id:
+        return
+    token = st.query_params.get("t")
+    if not token:
+        return
+    try:
+        r = requests.get(f"{API}/auth/session/{token}", timeout=10)
+        if r.status_code == 200:
+            data = r.json()
+            st.session_state.user_id = data["user_id"]
+            st.session_state.session_token = token
+        else:
+            del st.query_params["t"]
+    except Exception:
+        pass
+
+
+_restore_session()
 
 
 def cache_items(items):
@@ -421,6 +455,21 @@ def _item_media_html(it, css_class="ep-card-placeholder", size_style=""):
     return f'<div class="{css_class}" style="{size_style}background:{bg};">{icon}</div>'
 
 
+def _complete_login(data):
+    """Shared by login and signup: sets the session, stashes the 'remember
+    me' token in the URL so a hard reload survives (see _restore_session),
+    then replays whatever action (wishlist/cart/buy) triggered the login
+    prompt in the first place."""
+    st.session_state.user_id = data["user_id"]
+    st.session_state.session_token = data.get("token")
+    if st.session_state.session_token:
+        st.query_params["t"] = st.session_state.session_token
+    st.session_state.viewed_items = set()
+    st.session_state.page = "home"
+    _run_pending_action()
+    st.rerun()
+
+
 def render_auth_popover(key_suffix=""):
     """key_suffix keeps widget keys unique across call sites -- Streamlit
     renders st.popover content on every rerun regardless of whether the
@@ -440,11 +489,7 @@ def render_auth_popover(key_suffix=""):
                 data, status, detail = post("/auth/login", {"user_id": u, "password": p},
                                             quiet_errors=(401,))
                 if data:
-                    st.session_state.user_id = data["user_id"]
-                    st.session_state.viewed_items = set()
-                    st.session_state.page = "home"
-                    _run_pending_action()
-                    st.rerun()
+                    _complete_login(data)
                 elif status == 401:
                     st.error("Wrong username or password.")
     with tab_signup:
@@ -455,11 +500,7 @@ def render_auth_popover(key_suffix=""):
                 data, status, detail = post("/auth/register", {"user_id": u, "password": p},
                                             quiet_errors=(409, 400))
                 if data:
-                    st.session_state.user_id = data["user_id"]
-                    st.session_state.viewed_items = set()
-                    st.session_state.page = "home"
-                    _run_pending_action()
-                    st.rerun()
+                    _complete_login(data)
                 elif status == 409:
                     st.error(f"'{u}' is already taken.")
                 elif status == 400:
@@ -612,7 +653,12 @@ with head_r:
             with st.popover(f"👤 {uid_short}", use_container_width=True):
                 st.write(f"Logged in as **{st.session_state.user_id}**")
                 if st.button("Log out", use_container_width=True):
+                    if st.session_state.session_token:
+                        delete(f"/auth/session/{st.session_state.session_token}")
+                    if "t" in st.query_params:
+                        del st.query_params["t"]
                     st.session_state.user_id = None
+                    st.session_state.session_token = None
                     st.session_state.selected_item = None
                     st.session_state.page = "home"
                     st.rerun()

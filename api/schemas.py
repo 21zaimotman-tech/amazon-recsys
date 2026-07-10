@@ -29,6 +29,7 @@ class LoginRequest(BaseModel):
 class AuthResponse(BaseModel):
     user_id: str
     n_interactions: int
+    token: Optional[str] = None
 
 
 class CartResponse(BaseModel):

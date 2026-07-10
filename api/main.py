@@ -5,7 +5,8 @@ import psycopg2.errors
 from fastapi import FastAPI, HTTPException
 from .db import (get_conn, fetch_user_history, fetch_items, search_items, create_user,
                  get_user, log_event, add_to_cart, remove_from_cart, get_cart, checkout,
-                 add_to_wishlist, remove_from_wishlist, get_wishlist, get_orders)
+                 add_to_wishlist, remove_from_wishlist, get_wishlist, get_orders,
+                 create_session, get_session_user, delete_session)
 from .auth import hash_password, verify_password
 from .recommender import Recommender
 from .schemas import (RecResponse, Item, RegisterRequest, LoginRequest, AuthResponse,
@@ -114,11 +115,12 @@ def register(body: RegisterRequest):
     conn = get_conn()
     try:
         create_user(conn, body.user_id, password_hash, password_salt)
+        token = create_session(conn, body.user_id)
     except psycopg2.errors.UniqueViolation:
         raise HTTPException(409, f"user_id '{body.user_id}' is already taken")
     finally:
         conn.close()
-    return AuthResponse(user_id=body.user_id, n_interactions=0)
+    return AuthResponse(user_id=body.user_id, n_interactions=0, token=token)
 
 
 @app.post("/auth/login", response_model=AuthResponse)
@@ -126,11 +128,38 @@ def login(body: LoginRequest):
     conn = get_conn()
     try:
         user = get_user(conn, body.user_id)
+        if not user or not verify_password(body.password, user["password_hash"], user["password_salt"]):
+            raise HTTPException(401, "invalid user_id or password")
+        token = create_session(conn, user["user_id"])
     finally:
         conn.close()
-    if not user or not verify_password(body.password, user["password_hash"], user["password_salt"]):
-        raise HTTPException(401, "invalid user_id or password")
-    return AuthResponse(user_id=user["user_id"], n_interactions=user["n_interactions"])
+    return AuthResponse(user_id=user["user_id"], n_interactions=user["n_interactions"], token=token)
+
+
+@app.get("/auth/session/{token}", response_model=AuthResponse)
+def session_lookup(token: str):
+    """Resolves a 'remember me' token (stashed in the frontend's URL query
+    string, which survives a hard browser reload unlike st.session_state)
+    back to a user -- lets a reloaded page restore login without a
+    password."""
+    conn = get_conn()
+    try:
+        user = get_session_user(conn, token)
+    finally:
+        conn.close()
+    if not user:
+        raise HTTPException(404, "session not found")
+    return AuthResponse(user_id=user["user_id"], n_interactions=user["n_interactions"], token=token)
+
+
+@app.delete("/auth/session/{token}")
+def session_logout(token: str):
+    conn = get_conn()
+    try:
+        delete_session(conn, token)
+    finally:
+        conn.close()
+    return {"status": "ok"}
 
 
 # ---------------------------------------------------------------- behavior events + cart

@@ -1,5 +1,6 @@
 """Postgres access. Connection settings come from env (see .env.example)."""
 import os
+import secrets
 import psycopg2
 import psycopg2.extras
 
@@ -13,12 +14,24 @@ def get_conn():
     )
 
 def fetch_user_history(conn, user_id, limit=20):
-    """User's TEST-PERIOD interaction history (most recent first). This is the
-    activity the model serves on but was NOT trained on."""
+    """User's TEST-PERIOD interaction history (most recent DISTINCT item
+    first). This is the activity the model serves on but was NOT trained on.
+
+    DISTINCT ON item_id (keeping each item's latest timestamp) matters: a
+    raw "last N interaction ROWS" query lets one item clicked/added
+    repeatedly (e.g. double-tapping Add to cart, or a view + a like on the
+    same item) occupy several slots of the window, diluting the user
+    embedding with duplicates of one item instead of reflecting the last N
+    DIFFERENT things the user actually engaged with -- e.g. a single fresh
+    wishlist add got outweighed by an older item that had 10 stray rows
+    from earlier testing, even though the wishlist add was the most recent
+    real signal."""
     with conn.cursor() as cur:
         cur.execute(
-            "SELECT item_id FROM interactions WHERE user_id=%s "
-            "ORDER BY ts DESC LIMIT %s", (user_id, limit))
+            "SELECT item_id FROM ("
+            "  SELECT DISTINCT ON (item_id) item_id, ts FROM interactions"
+            "  WHERE user_id=%s ORDER BY item_id, ts DESC"
+            ") dedup ORDER BY ts DESC LIMIT %s", (user_id, limit))
         return [r[0] for r in cur.fetchall()]
 
 def fetch_items(conn, item_ids):
@@ -52,6 +65,30 @@ def create_user(conn, user_id, password_hash, password_salt):
         cur.execute(
             "INSERT INTO users (user_id, password_hash, password_salt) VALUES (%s,%s,%s)",
             (user_id, password_hash, password_salt))
+    conn.commit()
+
+
+def create_session(conn, user_id):
+    """Opaque 'remember me' token -- see db/init.sql sessions table comment."""
+    token = secrets.token_urlsafe(32)
+    with conn.cursor() as cur:
+        cur.execute("INSERT INTO sessions (token, user_id) VALUES (%s,%s)", (token, user_id))
+    conn.commit()
+    return token
+
+
+def get_session_user(conn, token):
+    with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+        cur.execute(
+            "SELECT u.user_id, u.n_interactions FROM sessions s "
+            "JOIN users u ON u.user_id = s.user_id WHERE s.token=%s", (token,))
+        row = cur.fetchone()
+        return dict(row) if row else None
+
+
+def delete_session(conn, token):
+    with conn.cursor() as cur:
+        cur.execute("DELETE FROM sessions WHERE token=%s", (token,))
     conn.commit()
 
 

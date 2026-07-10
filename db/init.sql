@@ -29,6 +29,18 @@ CREATE TABLE IF NOT EXISTS users (
     created_at     TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
+-- opaque "remember me" tokens so login survives a hard browser reload (a
+-- full page reload starts a brand-new Streamlit session, which wipes
+-- st.session_state -- the frontend stashes this token in the URL's query
+-- string, which DOES survive a reload, and re-resolves it back to a
+-- user_id here on the next run). Not a full auth session system (no
+-- expiry) -- fine for a demo, but a real product would want one.
+CREATE TABLE IF NOT EXISTS sessions (
+    token      TEXT PRIMARY KEY,
+    user_id    TEXT REFERENCES users(user_id) ON DELETE CASCADE,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
 -- persistent cart, separate from the interaction-log signal below (a user's
 -- cart is what they intend to buy right now; interactions are the full
 -- engagement history the model reads at serving time)
