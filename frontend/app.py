@@ -253,6 +253,18 @@ div[class*="st-key-hscroll-"] div[data-testid="stColumn"]:hover .ep-hcard {
     width: 100%; aspect-ratio: 1 / 1; object-fit: cover; border-radius: 8px;
     display: flex; align-items: center; justify-content: center; font-size: 1.7rem;
 }
+
+/* ---- search suggestion chips (as-you-type, above the full result grid) ---- */
+.ep-suggest-label { font-size: 0.72rem; font-weight: 700; color: #9CA3AF; margin: 0.4rem 0 0.3rem 0; }
+div[data-testid="stElementContainer"][class*="st-key-suggest-"] div[data-testid="stButton"] button {
+    border-radius: 999px !important; background: #F3F4F6 !important; border: 1px solid #E5E7EB !important;
+    color: #374151 !important; font-size: 0.76rem !important; font-weight: 600 !important;
+    padding: 0.3rem 0.7rem !important; white-space: nowrap !important; overflow: hidden !important;
+    text-overflow: ellipsis !important;
+}
+div[data-testid="stElementContainer"][class*="st-key-suggest-"] div[data-testid="stButton"] button:hover {
+    border-color: #2563EB !important; color: #2563EB !important; background: #EFF6FF !important;
+}
 </style>
 """,
     unsafe_allow_html=True,
@@ -817,10 +829,27 @@ if search_query.strip():
                unsafe_allow_html=True)
     data = get(f"/search?q={quote(search_query.strip())}&n=24")
     if data:
-        if not data["items"]:
+        items = data["items"]
+        if not items:
             st.caption("No items match your search.")
         else:
-            render_grid(data["items"], "Search", key_prefix="search")
+            # Live suggestions: as the user types, the same query already
+            # reruns and refetches on every keystroke (plain st.text_input,
+            # no form) -- these chips just surface the top few matches as
+            # one-click jumps to a product's detail panel above the full
+            # grid below, instead of making the user scan the whole grid.
+            cache_items(items)
+            suggestions = items[:6]
+            if len(suggestions) > 1:
+                st.markdown('<div class="ep-suggest-label">SUGGESTIONS</div>', unsafe_allow_html=True)
+                sugg_cols = st.columns(len(suggestions))
+                for col, it in zip(sugg_cols, suggestions):
+                    with col:
+                        label = (it.get("title") or it.get("brand") or it.get("item_id"))[:26]
+                        if st.button(label, key=f"suggest-{it['item_id']}", use_container_width=True,
+                                    help=it.get("title")):
+                            _select_item(it["item_id"])
+            render_grid(items, "Search", key_prefix="search")
 elif st.session_state.page == "wishlist" and st.session_state.user_id:
     render_wishlist_page()
 elif st.session_state.page == "cart" and st.session_state.user_id:
