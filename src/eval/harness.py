@@ -37,8 +37,12 @@ def evaluate_index(index, user_vecs, user_ids, test_gt, train_df, catalog_size,
 
 # ---- user-vector builders (call from the notebook) ----
 def mfbpr_user_vecs(model, user_idx):
-    """MF-BPR user vectors = rows of the user embedding table."""
-    return model.user_emb.weight.detach().cpu().numpy()[user_idx]
+    """MF-BPR user vectors = rows of the user embedding table, with a constant
+    1 appended so the dot product with export_item_embeddings' augmented item
+    vectors reproduces dot(user,item) + item_bias exactly."""
+    vecs = model.user_emb.weight.detach().cpu().numpy()[user_idx]
+    ones = np.ones((vecs.shape[0], 1), dtype=vecs.dtype)
+    return np.concatenate([vecs, ones], axis=1)
 
 
 def two_tower_user_vecs(model, histories, max_hist=20, device="cpu"):

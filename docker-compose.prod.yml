@@ -1,0 +1,33 @@
+# Production overlay: HTTPS via Caddy, no service ports published directly.
+#
+#   DOMAIN=shop.example.com docker compose \
+#       -f docker-compose.yml -f docker-compose.prod.yml up -d --build
+#
+# See deploy/README.md for the full walkthrough.
+services:
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    ports: ["80:80", "443:443"]
+    environment:
+      DOMAIN: ${DOMAIN:?set DOMAIN to your site hostname}
+    volumes:
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on: [frontend, api]
+
+  # only Caddy is reachable from outside in production
+  postgres:
+    ports: !override []
+    restart: unless-stopped
+  api:
+    ports: !override []
+    restart: unless-stopped
+  frontend:
+    ports: !override []
+    restart: unless-stopped
+
+volumes:
+  caddy_data:
+  caddy_config:

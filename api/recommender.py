@@ -55,14 +55,19 @@ class Recommender:
                 return F.normalize(m(h, mask), dim=-1)[0].numpy()
         return fn
 
-    def popular(self, n=10):
-        return (self.popularity or [])[:n], "Popular right now"
+    def popular(self, n=10, temperature=1.0, seed=None):
+        """Weighted sample from the popularity head (not a fixed top-n) so
+        the trending feed is different on every page load. `seed` comes from
+        the frontend's per-browser-session feed seed: stable while the user
+        browses, fresh on reload."""
+        pool = (self.popularity or [])[: max(n * 3, 60)]
+        return _sample(pool, n, temperature, seed), "Popular right now"
 
-    def recommend(self, user_id, history_item_ids, n=10, temperature=1.0):
+    def recommend(self, user_id, history_item_ids, n=10, temperature=1.0, seed=None):
         """Returns (item_ids, model_label, timings_ms)."""
         t = {}
         if not history_item_ids or self.faiss is None or self.tower is None:
-            items, label = self.popular(n)
+            items, label = self.popular(n, temperature, seed)
             return items, label, t
 
         hist_idx = [self.idx_map[i] for i in history_item_ids if i in self.idx_map]
@@ -71,7 +76,7 @@ class Recommender:
         uvec = self.tower(hist_idx)
         t["user_tower"] = (time.perf_counter() - s) * 1e3
         if uvec is None:
-            items, label = self.popular(n); return items, label, t
+            items, label = self.popular(n, temperature, seed); return items, label, t
 
         s = time.perf_counter()
         import faiss
@@ -82,12 +87,12 @@ class Recommender:
         t["faiss"] = (time.perf_counter() - s) * 1e3
 
         if self.ranker is None or self.store is None:        # retrieval-only (pre-S4)
-            return _sample(cands, n, temperature), "Two-tower", t
+            return _sample(cands, n, temperature, seed), "Two-tower", t
 
         s = time.perf_counter()
         ranked = self._rerank(user_id, cands, cand_scores)
         t["lgbm"] = (time.perf_counter() - s) * 1e3
-        return _sample(ranked, n, temperature), "Two-tower + LightGBM", t
+        return _sample(ranked, n, temperature, seed), "Two-tower + LightGBM", t
 
     def _rerank(self, user_id, cands, cand_scores):
         """Compute ranking features online and re-order candidates."""
@@ -108,12 +113,19 @@ class Recommender:
         return self.popular(n)
 
 
-def _sample(items, n, temperature):
-    """Temperature sampling from the candidate list so recs vary on reload."""
+def _sample(items, n, temperature, seed=None, half_life=40.0):
+    """Temperature sampling from the candidate list so recs vary on reload.
+
+    `half_life` spreads the rank decay: the old e^-rank weighting collapsed
+    to ~zero by rank 20, which made the "sampled" top-20 deterministic in
+    practice. e^(-rank/8) keeps the head favored but the tail reachable.
+    A fixed `seed` (per browser session) keeps the list stable while the
+    user browses; a reload brings a new seed and a fresh list."""
     if temperature <= 0 or len(items) <= n:
         return items[:n]
+    rng = np.random.default_rng(seed)
     ranks = np.arange(len(items))
-    logits = -ranks / max(temperature, 1e-6)
+    logits = -ranks / max(temperature * half_life, 1e-6)
     p = np.exp(logits - logits.max()); p /= p.sum()
-    chosen = np.random.choice(len(items), size=min(n, len(items)), replace=False, p=p)
+    chosen = rng.choice(len(items), size=min(n, len(items)), replace=False, p=p)
     return [items[i] for i in sorted(chosen)]

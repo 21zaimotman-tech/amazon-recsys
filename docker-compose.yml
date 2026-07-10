@@ -16,6 +16,7 @@ services:
       retries: 10
 
   api:
+    restart: unless-stopped
     build:
       context: .
       dockerfile: api/Dockerfile
@@ -32,6 +33,7 @@ services:
         condition: service_healthy
 
   frontend:
+    restart: unless-stopped        # streamlit can rarely segfault; self-heal
     build:
       context: .
       dockerfile: frontend/Dockerfile

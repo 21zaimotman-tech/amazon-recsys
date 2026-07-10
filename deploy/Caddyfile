@@ -1,0 +1,13 @@
+# Reverse proxy for production: one domain, automatic HTTPS (Let's Encrypt).
+# Streamlit (frontend) is the site root; the FastAPI service is under /api
+# for external consumers (the frontend itself talks to the API over the
+# internal Docker network, not through here).
+{$DOMAIN} {
+    handle /api/* {
+        uri strip_prefix /api
+        reverse_proxy api:8000
+    }
+    handle {
+        reverse_proxy frontend:8501
+    }
+}

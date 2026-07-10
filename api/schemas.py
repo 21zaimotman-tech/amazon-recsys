@@ -9,6 +9,8 @@ class Item(BaseModel):
     brand: Optional[str] = None
     price: Optional[float] = None
     avg_rating: Optional[float] = None
+    qty: Optional[int] = None        # cart/orders line quantity
+    reason: Optional[str] = None     # "Because you viewed ..." (recommendations)
 
 class RecResponse(BaseModel):
     model_label: str                 # which model produced these (shown in UI)

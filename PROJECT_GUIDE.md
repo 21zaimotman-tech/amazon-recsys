@@ -114,6 +114,39 @@ Precompute `similar_items` for every item (via `EmbeddingIndex.similar_items`) �
 negatives, why softmax cross-entropy over the batch (both called out explicitly in the file's
 docstring as defense questions).
 
+### Pretrained models and LLM APIs (e.g. Gemini) — what's allowed and what isn't
+
+**Not allowed, for anything that produces a recommendation.** MF-BPR, two-tower, and LightGBM must
+be trained by your own code on your own interaction data — no downloading a trained
+MF/two-tower/recommender checkpoint, no RecBole/Surprise/LensKit, and **no calling an LLM API
+(Gemini or otherwise) to generate or influence which items get recommended.** An LLM can't replace
+gradient descent on your interaction data, and doing so would violate the "implement from scratch"
+requirement you have to defend live. This applies everywhere a recommendation is produced — training
+notebooks, the ranker, and the live API's `/recommend`, `/similar`, `/because-you-liked` endpoints.
+
+**Allowed, optional, and unrelated to the recommendation logic — two narrow uses:**
+
+1. **Pretrained text embeddings as one input feature inside your own item tower** (not a
+   replacement for the model). This is the exact pattern Session 3's "Item Tower Inputs" slide
+   shows: ID embedding + text encoder + categorical + numerical, concatenated, then passed through
+   your own MLP. Concretely: run each item's title through a pretrained sentence encoder to get a
+   fixed embedding, concatenate it with `ItemTower`'s existing `nn.Embedding` lookup in
+   `src/models/two_tower.py` before the `mlp`, and train the whole thing exactly as before — same
+   loss, same loop, still your code. Use `sentence-transformers` (local, free, no API key) for this,
+   not the Gemini API — a live external API call has no place in a training loop, and this doesn't
+   need Gemini specifically. This helps the cold-start problem: a new/rare item gets a meaningful
+   starting representation from its title instead of a near-random one. Document it as a deliberate
+   design choice in the notebook and `ANALYSIS.md`'s cold-start section if you do it.
+2. **Explainability (a listed bonus item), strictly after recommendations are already produced.**
+   Once your models have picked the top-10 items for a user, you could optionally use the Gemini API
+   to generate a short natural-language reason for the recommendation, e.g. "similar to your recent
+   audio purchases and trending this week." This never touches which items get recommended — it only
+   narrates a decision your own models already made. Keep this offline/precomputed, not a live call
+   inside `api/recommender.py`'s request path — the demo has to run reliably via `docker compose up`
+   without depending on external API uptime during the defense.
+
+If in doubt: your Gemini key can write words about a recommendation, never choose one.
+
 ### Step 6 — Notebook 05: LightGBM ranking (owner: Person A + everyone on features, matches S4)
 
 Retrieve top-100 candidates for train users with your best retriever. Label positive if the item

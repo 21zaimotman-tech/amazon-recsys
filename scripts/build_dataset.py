@@ -42,15 +42,52 @@ def stream_jsonl(url=None, local_file=None):
                     yield json.loads(raw)
 
 
-def stream_reviews(limit=None, local_file=None):
+def _flush_chunk(buf_u, buf_i, buf_r, buf_t):
+    """Convert one bounded batch of raw Python lists into a compact
+    pyarrow-backed DataFrame. Plain object-dtype pandas strings cost ~50-80
+    bytes of Python object overhead PER STRING on top of the content --
+    holding all ~22M post-2019 rows that way (the naive "accumulate one
+    giant list, then pd.DataFrame() it at the end" approach) risks OOM on
+    an 8GB machine. Flushing every `chunk_size` rows into a pyarrow-backed
+    chunk keeps peak memory bounded to one chunk at a time instead of the
+    whole stream."""
+    return pd.DataFrame({
+        "user_id": pd.array(buf_u, dtype="string[pyarrow]"),
+        "item_id": pd.array(buf_i, dtype="string[pyarrow]"),
+        "rating": buf_r,
+        "timestamp": buf_t,
+    })
+
+
+def stream_reviews(limit=None, local_file=None, chunk_size=500_000):
     cutoff = int(datetime(C.RECENT_FROM_YEAR, 1, 1).timestamp() * 1000)  # ms
-    rows = []
+    chunks = []
+    buf_u, buf_i, buf_r, buf_t = [], [], [], []
+    kept = 0
     for r in stream_jsonl(REVIEW_URL, local_file):
         if r["timestamp"] >= cutoff:
-            rows.append((r["user_id"], r[C.USE_ITEM_LEVEL], r["rating"], r["timestamp"]))
-        if limit and len(rows) >= limit:
+            buf_u.append(r["user_id"]); buf_i.append(r[C.USE_ITEM_LEVEL])
+            buf_r.append(r["rating"]); buf_t.append(r["timestamp"])
+            kept += 1
+            if len(buf_u) >= chunk_size:
+                chunks.append(_flush_chunk(buf_u, buf_i, buf_r, buf_t))
+                buf_u, buf_i, buf_r, buf_t = [], [], [], []
+                print(f"    ...streamed {kept:,} kept rows so far")
+        if limit and kept >= limit:
             break
-    return pd.DataFrame(rows, columns=["user_id", "item_id", "rating", "timestamp"])
+    if buf_u:
+        chunks.append(_flush_chunk(buf_u, buf_i, buf_r, buf_t))
+    if not chunks:
+        return pd.DataFrame(columns=["user_id", "item_id", "rating", "timestamp"])
+    df = pd.concat(chunks, ignore_index=True)
+    # Back to plain dtypes once we're down from ~22M raw rows to whatever
+    # survived the recent-window filter -- subsample()/encode_ids() etc.
+    # were written and tested against ordinary object-dtype string columns,
+    # and post-subsample the row count is small enough (~5M cap) that the
+    # object-dtype overhead is no longer a memory risk.
+    df["user_id"] = df["user_id"].astype(object)
+    df["item_id"] = df["item_id"].astype(object)
+    return df
 
 
 def pick_image(imgs):

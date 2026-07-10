@@ -106,6 +106,9 @@ def train_mfbpr(train_df, n_users, n_items, dim=64, lr=0.05, reg=1e-5,
 
 
 def export_item_embeddings(model):
-    """Item matrix for FAISS = item_emb. (User vectors come from user_emb at
-    serving time; for cold users fall back to popularity.)"""
-    return model.item_emb.weight.detach().cpu().numpy()
+    """Item matrix for FAISS = item_emb, with item_bias folded in as an extra
+    dimension (so raw dot product with an augmented user vector reproduces the
+    exact training-time score: dot(user,item) + item_bias)."""
+    item_vecs = model.item_emb.weight.detach().cpu().numpy()
+    item_bias = model.item_bias.weight.detach().cpu().numpy()  # (n_items, 1)
+    return np.concatenate([item_vecs, item_bias], axis=1)

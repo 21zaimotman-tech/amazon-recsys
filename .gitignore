@@ -11,3 +11,13 @@ docker-compose.override.yml
 .idea/
 *.zip
 .DS_Store
+
+# Full-dataset artifacts regenerate from the pipeline and exceed GitHub's
+# limits (train.parquet alone is 151MB > 100MB hard cap). Result CSVs stay
+# tracked; heavy binaries live locally / in Drive.
+data/*.parquet
+data/*.npy
+data/*.pt
+data/*.pkl
+data/id_encoders.json
+data/similar_items.json
