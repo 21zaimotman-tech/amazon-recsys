@@ -3,10 +3,6 @@ __pycache__/
 .venv/
 venv/
 rawdata/
-artifacts/*.npy
-artifacts/*.pt
-artifacts/*.pkl
-artifacts/*.json
 .env
 .claude/
 docker-compose.override.yml
