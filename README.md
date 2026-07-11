@@ -21,8 +21,7 @@ Test-period evaluation, train-seen items excluded, positives = rating ≥ 4.0.
 | Random | 0.0001 | 0.0001 | 0.0003 | 0.0001 | 1.0000 |
 | Popularity | 0.0035 | 0.0021 | 0.0191 | 0.0062 | 0.0005 |
 | MF-BPR | 0.0035 | 0.0020 | 0.0190 | 0.0059 | 0.0005 |
-| Two-tower | 0.0018 | 0.0011 | 0.0042 | 0.0017 | **0.9503** |
-| Two-tower + LightGBM | *(final full run in progress — see `data/comparison_results.csv`)* | | | | |
+| Two-tower | 0.0018 | 0.0011 | 0.0042 | 0.0017 | **0.9503** | | | | |
 
 Two findings worth reading together (full discussion in `PROJECT_EXPLAINED.md` §5–6):
 
