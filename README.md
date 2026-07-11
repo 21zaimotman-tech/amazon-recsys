@@ -1,110 +1,123 @@
-# Real-Time Recommendation System — Amazon Electronics (2023)
+# ElectroPicks — Real-Time Recommender on Amazon Electronics
 
-Retrieval + ranking recommender served through a FastAPI + Postgres + Streamlit
-stack, all running with `docker compose up`. Dataset: Amazon Reviews 2023,
-**Electronics** category (McAuley-Lab/Amazon-Reviews-2023 on HuggingFace).
+End-to-end recommender system: **22.6M raw reviews → trained retrieval + ranking
+models → a live web store** where every click reshapes the next page. Dataset:
+Amazon Reviews 2023, **Electronics** (McAuley-Lab/Amazon-Reviews-2023, HuggingFace).
 
-> _Add a GIF of the webapp in action here._
+Stack: PyTorch (models from scratch) · FAISS · LightGBM · FastAPI · Postgres ·
+Streamlit · Docker Compose (+ Caddy production overlay).
 
-## Results
+**Docs:** [`PROJECT_EXPLAINED.md`](PROJECT_EXPLAINED.md) — the complete technical
+explainer (models, math, serving, everything) ·
+[`presentation.html`](presentation.html) + [`presentation_script.md`](presentation_script.md)
+— the defense deck and per-slide script · [`ANALYSIS.md`](ANALYSIS.md) — findings.
 
-Measured on a local sample of 131,154 interactions / 15,038 users / 9,487 items (5-core
-filtered; smaller than the brief's full 5M-interaction target — see `ANALYSIS.md` §6 for what
-that means for these numbers).
+## Results — full dataset (4.02M train interactions · 148K items · 552K users)
 
-| Method | Recall@20 | Recall@50 | NDCG@10 | Coverage |
-|--------|-----------|-----------|---------|----------|
-| Random | 0.0024 | 0.0049 | 0.0007 | 1.0000 |
-| Popularity | 0.0175 | 0.0499 | 0.0071 | 0.0066 |
-| MF-BPR | 0.0025 | 0.0051 | 0.0007 | 1.0000 |
-| Two-tower | 0.0052 | 0.0104 | 0.0026 | 0.9975 |
-| Two-tower + LightGBM | 0.0100 | 0.0140 | 0.0043 | 0.9907 |
+Test-period evaluation, train-seen items excluded, positives = rating ≥ 4.0.
 
-Each stage beats the one before it on every metric (Two-tower > MF-BPR, +LightGBM > Two-tower
-alone) — Popularity still wins on raw Recall/NDCG at this sample size (a real, discussed
-finding, not a bug — see `ANALYSIS.md` §1), but every learned method reaches 99%+ Coverage
-against Popularity's 0.66%, the accuracy/diversity trade-off the brief asks for.
+| Method | Recall@10 | NDCG@10 | Recall@50 | NDCG@50 | Coverage@50 |
+|--------|-----------|---------|-----------|---------|-------------|
+| Random | 0.0001 | 0.0001 | 0.0003 | 0.0001 | 1.0000 |
+| Popularity | 0.0035 | 0.0021 | 0.0191 | 0.0062 | 0.0005 |
+| MF-BPR | 0.0035 | 0.0020 | 0.0190 | 0.0059 | 0.0005 |
+| Two-tower | 0.0018 | 0.0011 | 0.0042 | 0.0017 | **0.9503** |
+| Two-tower + LightGBM | *(final full run in progress — see `data/comparison_results.csv`)* | | | | |
 
-**Average API response time:** ~47ms mean / ~54ms p95 end-to-end (LightGBM re-ranking is 84%
-of that — see `ANALYSIS.md` §5 for the full per-component breakdown).
+Two findings worth reading together (full discussion in `PROJECT_EXPLAINED.md` §5–6):
+
+- **MF-BPR converged to a popularity clone** — with retrieval made faithful to the
+  training objective (item bias folded into the FAISS index), its per-item bias term
+  dominates on this head-heavy catalog and recall/coverage land exactly on
+  Popularity's. An honest negative result, not a bug.
+- **The two-tower trades recall for genuine personalization** — 95% catalog coverage
+  vs Popularity's 0.05%. Never read Recall without Coverage: a recommender can score
+  well by showing everyone the same ~70 bestsellers.
 
 ## Architecture
 
-**Offline (notebook):** subsample → time split → train MF-BPR & two-tower → FAISS →
-LightGBM ranker → export embeddings/index/model to `artifacts/`, populate Postgres.
+**Offline:** `01 data prep → 02 baselines → 03 MF-BPR → 04 two-tower → 05 LightGBM`
+— each notebook feeds the next; 05 exports `artifacts/` (towers, FAISS inputs,
+LightGBM model, popularity, feature store).
 
-**Online (API):** request → fetch user's *test-period* history from Postgres →
-user-tower forward pass → FAISS top-100 → LightGBM re-rank → top-10. Cold/unknown
-users fall back to popularity. Different pages use different models (see the table
-in `notebooks/README.md`).
+**Online, per request:** Postgres history (last 20 distinct items) → TorchScript user
+tower → FAISS top-100 → LightGBM re-rank → seeded temperature sampling (fresh feed
+per visit, stable within a session) → brand cap → "Because you viewed …" reasons.
+Cold/unknown users fall back to popularity. Per-component latency is returned with
+every response (visible in debug mode).
 
 ```
-src/        data, eval (shared metrics), baselines, models, retrieval, ranking
-api/        FastAPI service (/docs for Swagger)
-frontend/   Streamlit UI
-db/         Postgres schema
-scripts/    export_artifacts.py, populate_db.py
-notebooks/  the report (5 narrated notebooks)
-artifacts/  exported models + index inputs (git-ignored)
+src/         config, data pipeline, eval, baselines, models, retrieval, ranking
+notebooks/   the executed pipeline (full-dataset outputs saved inside)
+api/         FastAPI service — Swagger at /docs
+frontend/    the ElectroPicks store (Streamlit)
+db/          Postgres schema (pg_trgm search indexes, carts w/ qty, orders, sessions)
+scripts/     build_dataset, export_artifacts, populate_db, benchmark_latency
+deploy/      Caddy config + production walkthrough
+artifacts/   what the API serves (exported by notebook 05)
+data/        frozen split + result CSVs (heavy binaries git-ignored — regenerate or
+             pull from the team Drive)
 ```
+
+## The store
+
+Realtime personalization (every view/save/cart/buy changes the next page — no
+retraining), type-ahead search with filters & sorting, category browsing, carts with
+quantities, order history, wishlist, shareable product links (`?item=…`), cold-start
+onboarding, category-guarded "Similar items", star ratings & badges, and a built-in
+analytics dashboard.
+
+**Client mode by default** — model labels, latency pills, the diversity slider, and
+analytics are hidden unless you append **`?debug=1`** to the URL.
 
 ## Run it
 
 ```bash
 cp .env.example .env
-# 1) train in the notebooks, then export:
-python scripts/export_artifacts.py        # writes artifacts/
-# 2) bring up the stack:
-docker compose up --build
-# 3) load data into Postgres (after postgres is healthy):
-python scripts/populate_db.py
+docker compose up -d --build          # postgres + api + frontend
+python -m scripts.populate_db         # once: items + test-period interactions
 ```
 
+- Store: http://localhost:8501 (debug: http://localhost:8501/?debug=1)
 - API: http://localhost:8000/docs
-- Frontend: http://localhost:8501
 
-The stack also boots **before** models exist (S2): the API serves popularity and
-degrades gracefully, so you can demo early and add models as they land.
+The stack boots even before models exist — the API degrades gracefully to
+popularity-only.
 
-## Reproduce the notebook
-Open `notebooks/` in Colab (GPU runtime for PyTorch). Each notebook is
-self-contained and imports from `src/`. Save the frozen split + checkpoints to
-Google Drive to survive session timeouts.
+**Production:** one command behind Caddy with automatic HTTPS —
+see [`deploy/README.md`](deploy/README.md).
+
+```bash
+DOMAIN=shop.example.com docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --build
+```
+
+## Reproduce the training
+
+- **Colab (recommended):** upload `notebooks/run_all_colab.ipynb`, put the prepared
+  `data/` folder in Drive at `MyDrive/amazon-recsys-data/data/`, pick a T4 runtime,
+  Run all. It pins the fixed `src/` files, refuses to run on stale/sample data, and
+  syncs results back to Drive.
+- **Locally:** run notebooks 01→05 in order. Note for 8 GB machines: notebook 05 is
+  memory-tuned (retrieves candidates only for users that can form LambdaRank groups)
+  and LightGBM runs single-threaded to avoid a macOS OpenMP clash with torch/FAISS.
 
 ## Who did what
-| Member | Responsibility | Notebook(s) |
-|--------|----------------|-------------|
-| A | Data prep, EDA, time split, shared eval pipeline, baselines, feature engineering, LightGBM ranking | 01, 02, 05 |
-| B | MF-BPR (from scratch), FAISS retrieval | 03 |
-| C | Two-tower (from scratch), embedding export, similar-items | 04 |
-| D | Webapp: Postgres, FastAPI, Streamlit, Docker, latency logging | — (`api/`, `frontend/`, `db/`) |
 
-_(Names go here — the brief grades an accurate task split, not the placeholder letters.)_
+| Member | Owned |
+|--------|-------|
+| **Arun Kumar Aluru** | Two-tower retrieval (Notebook 04 — the deployed core), system architecture, full-dataset production runs, integration/GitHub, deployment |
+| **Nimisha Busaniwar** | MF-BPR from scratch (Notebook 03): BPR loss, negative sampling, item-bias retrieval fix |
+| **Otmane Zaim** | Project scaffold & repo, data pipeline + time split (Notebook 01), baselines (Notebook 02), LightGBM ranking lead (Notebook 05) |
+| **Ram Navlani** | Webapp & serving stack (FastAPI · Postgres · Streamlit), realtime feedback loop, deployment stack |
 
-## Current status
+Ranking features were a shared effort across all four.
 
-- `src/data/load.py` and `src/data/split.py` (the blocker in `PROJECT_GUIDE.md`) are implemented,
-  including `encode_ids` for the train-fit id encoding MF-BPR/two-tower need.
-- Notebook 01 (data prep/EDA) has been run end-to-end on a real local sample (see its saved
-  outputs) — 700k raw reviews streamed → 131,154 interactions after 5-core → 111,481/6,557/13,116
-  train/val/test.
-- Notebooks 02-05 are fully written (baselines, MF-BPR, two-tower, LightGBM) and their core logic
-  has been correctness-tested, but the actual training runs (and this README's results table)
-  are meant to be executed on the full pipeline in Colab per `PROJECT_GUIDE.md` §4 — run them in
-  order 02 → 03 → 04 → 05 and each notebook's final cell saves what the next one needs.
-- The Docker/Postgres/FastAPI/Streamlit stack has been verified end-to-end in degraded
-  (popularity-only) mode: `docker compose up`, `/health`, `/popular`, `/recommend` (cold-user
-  fallback), `/similar` (unknown-item fallback), `/because-you-liked`, and `scripts/benchmark_latency.py`
-  all work correctly against a live stack. Sample latency on this machine (popularity-only,
-  no retrieval/ranking yet): DB ~3ms, total ~18ms mean / ~29ms p95 over 25 calls — expect this to
-  rise once the two-tower + LightGBM path is live (adds a user-tower forward pass, a FAISS search,
-  and an LGBM predict per request).
-- **Found and fixed a real bug** while verifying the stack: `scripts/populate_db.py` used
-  `.where(pd.notnull(items), None)` to convert missing prices to `NULL` before inserting into
-  Postgres — but `.where(..., None)` on a `float64` column silently coerces `None` back to `NaN`
-  (the column can't hold `None`), so items with no price landed in Postgres as literal `NaN`
-  rather than `NULL`. Postgres accepts `NaN` in a `real` column, but FastAPI's JSON encoder
-  rejects it (`ValueError: Out of range float values are not JSON compliant`), which 500'd
-  `/popular` — the very first, always-available endpoint — for any response that happened to
-  include one of the ~19% of items with no listed price. Fixed by casting to `object` dtype
-  before the `.where()` call so `None` actually sticks.
+## Engineering notes (the war stories)
+
+Real issues found and fixed during the full-scale run — details in
+`PROJECT_EXPLAINED.md` §9: MF-BPR retrieval made faithful to the training score
+(bias folding); an 8 GB OOM fixed by retrieving only group-eligible users (~7× memory,
+identical training data); a macOS LightGBM/OpenMP segfault (`num_threads=1`); browser
+auto-translate crashing the UI (`notranslate` guard); GitHub's 100 MB cap vs a 151 MB
+parquet (heavy data untracked); single-item Buy-now vs whole-cart checkout; multi-word
+search + pg_trgm indexes.

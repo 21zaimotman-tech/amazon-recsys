@@ -6,6 +6,37 @@ and the exact order of steps to finish the project and pass the defense.
 
 ---
 
+## ⚡ STATUS UPDATE — 2026-07-11 (read this first)
+
+**The plan below is essentially complete.** This guide remains as the team's reference
+for *why* each step exists; the current state of the system is documented in
+[`PROJECT_EXPLAINED.md`](PROJECT_EXPLAINED.md) (the full technical explainer) and
+[`README.md`](README.md) (results + how to run). Defense materials:
+[`presentation.html`](presentation.html) + [`presentation_script.md`](presentation_script.md).
+
+| Step (below) | Status |
+|---|---|
+| 1 — `src/data/load.py` + `split.py` | ✅ done (incl. `encode_ids`) |
+| 2 — Notebook 01 data prep/EDA | ✅ **executed on the FULL dataset** (22.6M raw → 4.02M train / 236K val / 473K test; 551,911 users / 148,177 items) |
+| 3 — Notebook 02 baselines | ✅ full run (Popularity R@50 0.0191, Coverage 0.0005) |
+| 4 — Notebook 03 MF-BPR | ✅ full run + **item-bias retrieval fix** (FAISS score ≡ training score). Finding: converges to a popularity clone — see `PROJECT_EXPLAINED.md` §5.2 |
+| 5 — Notebook 04 two-tower | ✅ full run (R@50 0.0042, **Coverage 0.9503**) — the deployed retriever |
+| 6 — Notebook 05 LightGBM | ✅ code complete + memory-tuned for 8GB machines + macOS OpenMP fix; final full-run numbers land in `data/*.csv` |
+| 7 — Webapp | ✅ done and far beyond the brief: realtime feedback loop, type-ahead search + filters, category browse, carts w/ quantities, orders, wishlist, share links, onboarding, reasons, analytics, `?debug=1` mode, production HTTPS overlay (`deploy/`) |
+| 8 — README/ANALYSIS | ✅ README updated with full-run results + real task split; ANALYSIS.md refresh pending final 05 numbers |
+
+**Remaining (small):** fill notebook 05's final numbers into README/ANALYSIS/deck ·
+re-run `scripts/benchmark_latency.py` against the full artifacts · optional no-bias
+MF-BPR ablation for the defense Q&A.
+
+**Notes that supersede sections below:** heavy `data/` files are now git-ignored
+(151MB parquet > GitHub's 100MB cap) — the frozen split lives locally / on the team
+Drive (`MyDrive/amazon-recsys-data/data`). Colab reruns should use
+`notebooks/run_all_colab.ipynb`, which pins the fixed `src/` files and sanity-checks
+that the *full* dataset (not the repo's old sample) is restored before training.
+
+---
+
 ## 1. What's already in the repo
 
 Your teammate committed a full scaffold (1 commit, ~1,250 lines). It is well-written and
@@ -23,12 +54,14 @@ Also done: `src/eval/metrics.py` (Recall@k, NDCG@k, Coverage — shared everywhe
 Streamlit frontend (`frontend/`), Postgres schema (`db/init.sql`), Docker Compose, and scripts
 (`build_dataset.py`, `run_baselines.py`, `export_artifacts.py`, `populate_db.py`, `benchmark_latency.py`).
 
-## 2. What's missing (blocking everything)
+## 2. What's missing (blocking everything) — ✅ RESOLVED
 
-`src/data/load.py` and `src/data/split.py` **do not exist**, even though `scripts/build_dataset.py`
-and `scripts/run_baselines.py` already import from them (`subsample`, `_clean_price`, `time_split`,
-`warn_leakage`, `ground_truth_from`). Nothing in the pipeline can run until these two files exist.
-This is step 1 below.
+*(Historical: kept for context. `src/data/load.py` and `src/data/split.py` exist and
+the whole pipeline has run on the full dataset — see the status table above.)*
+
+`src/data/load.py` and `src/data/split.py` **did not exist**, even though `scripts/build_dataset.py`
+and `scripts/run_baselines.py` already imported from them (`subsample`, `_clean_price`, `time_split`,
+`warn_leakage`, `ground_truth_from`). Nothing in the pipeline could run until these two files existed.
 
 ### Smaller issues to fix along the way
 - `EmbeddingIndex.similar_items()` in `src/retrieval/faiss_index.py` throws an uncaught error for an

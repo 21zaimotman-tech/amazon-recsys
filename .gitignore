@@ -21,3 +21,7 @@ data/*.pt
 data/*.pkl
 data/id_encoders.json
 data/similar_items.json
+Presentation_script.md
+presentation.html
+PROJECT_EXPLAINED.md
+PROJECT_GUIDE.md
