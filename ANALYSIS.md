@@ -1,155 +1,138 @@
 # ANALYSIS — results, tables, discussion
 
-All numbers below are from a real end-to-end run on a local sample of Amazon Reviews 2023
-Electronics: 131,154 interactions after 5-core filtering, 15,038 train users, 9,487 items,
-split `111,481 / 6,557 / 13,116` (train/val/test) by global timestamp quantile (see Notebook 01).
-This sample is smaller than the brief's `MAX_INTERACTIONS = 5,000,000` cap — the pipeline and
-code are unchanged at full scale, only the absolute numbers would shift (see §6).
+All numbers are from the **full-scale end-to-end run** on Amazon Reviews 2023 Electronics:
+22.6M raw reviews (2019→) → iterative 5-core → **4.73M interactions · 551,911 train users ·
+148,177 train items**, split 4,019,978 / 236,469 / 472,939 (train/val/test) by global
+timestamp quantiles (Notebook 01). Evaluation: test-period positives (rating ≥ 4), train-seen
+items excluded, catalog = train item vocabulary.
 
-## 1. Final comparison table
+## 1. Final comparison table (all methods, all metrics)
 
-| Method | Recall@10 | Recall@20 | Recall@50 | NDCG@10 | Coverage@50 |
-|--------|-----------|-----------|-----------|---------|-------------|
-| Random | 0.0011 | 0.0024 | 0.0049 | 0.0007 | 1.0000 |
-| Popularity | 0.0122 | 0.0175 | 0.0499 | 0.0071 | 0.0066 |
-| MF-BPR | 0.0012 | 0.0025 | 0.0051 | 0.0007 | 1.0000 |
-| Two-tower | 0.0041 | 0.0052 | 0.0104 | 0.0026 | 0.9975 |
-| Two-tower + LightGBM | 0.0063 | 0.0100 | 0.0140 | 0.0043 | 0.9907 |
+| Method | Recall@10 | NDCG@10 | Recall@20 | NDCG@20 | Recall@50 | NDCG@50 | Coverage@50 |
+|---|---|---|---|---|---|---|---|
+| Random | 0.0001 | 0.0001 | 0.0002 | 0.0001 | 0.0003 | 0.0001 | 1.0000 |
+| Popularity | 0.0035 | 0.0021 | 0.0078 | 0.0034 | 0.0191 | 0.0062 | 0.0005 |
+| MF-BPR | 0.0035 | 0.0020 | 0.0077 | 0.0033 | 0.0190 | 0.0059 | 0.0005 |
+| Two-tower | 0.0018 | 0.0011 | 0.0026 | 0.0013 | 0.0042 | 0.0017 | 0.9540 |
+| **Two-tower + LightGBM** | **0.0037** | **0.0026** | 0.0046 | 0.0029 | 0.0059 | 0.0032 | **0.8535** |
 
-**The pipeline is internally consistent — each stage beats the one before it on every single
-metric.** Two-tower beats MF-BPR across the board (as expected: it conditions on actual
-history instead of one fixed learned vector, and in-batch negatives give a denser signal per
-step than BPR's one-negative sampling). Two-tower + LightGBM beats Two-tower alone across the
-board too — re-ranking is doing real work, not noise.
+Three findings, in the order they surprised us:
 
-**The honest finding: Popularity still wins on raw Recall/NDCG against every learned method,
-including the full pipeline.** Popularity's Recall@50 (0.0499) is more than 3.5x
-Two-tower+LightGBM's (0.0140), and its NDCG@10 (0.0071) beats LightGBM's (0.0043) too. This
-looks surprising next to the "popularity has near-zero coverage" story from Notebook 02, but
-it's the direct consequence of two things layered together: Electronics is genuinely
-head-concentrated (Notebook 01: top 1% of items = 29.6% of interactions), and this local
-sample is small — 15,038 users is not much signal for a model to learn individual preferences
-from. At `MAX_INTERACTIONS = 5,000,000` (the brief's actual target scale, ~38x this sample),
-the learned methods would have far more per-user and per-item signal to work with and would be
-expected to close or reverse this gap — see §6.
+- **MF-BPR converged to a popularity clone.** With retrieval made faithful to the training
+  objective (the item-bias term folded into the FAISS index so served scores ≡ trained
+  scores), MF-BPR's metrics land on Popularity's to the third decimal — including the
+  collapsed coverage. On a head-heavy catalog (top 1% of items ≈ half of interactions), the
+  per-item bias absorbs popularity and recommending the head is the accuracy-optimal shortcut
+  for a pairwise objective. An honest negative result, not a bug.
+- **The two-tower trades recall for genuine personalization.** 95.4% catalog coverage
+  against Popularity's 0.05% — different users genuinely see different items — priced at
+  ~4.5× lower Recall@50. It has no bias term to absorb popularity, and in-batch softmax
+  penalizes popular items as frequent negatives.
+- **The ranking layer buys accuracy back: the full pipeline is the only personalized method
+  that beats Popularity on NDCG@10** (0.0026 vs 0.0021, +25%) while still covering **85% of
+  the catalog** (1,700× Popularity's coverage). Read Recall and Coverage together, always: a
+  recommender can score well by showing everyone the same ~70 bestsellers.
 
-**Where the learned methods unambiguously win: Coverage.** Popularity's Coverage@50 is 0.0066
-(it recommends the same ~63 items to everyone); every learned method sits at 0.99+ (Two-tower
-and Two-tower+LightGBM personalize almost every recommendation list; MF-BPR hits a perfect
-1.0 because its embedding-table lookup never collapses onto a shared list the way Popularity's
-fixed ranking does). This is the real accuracy/diversity trade-off the brief asks for: Popularity
-is a strong, cheap baseline for aggregate accuracy on a head-heavy catalog, but it cannot power
-a "similar items" or genuinely personalized page — every item and every user gets the identical
-list.
-
-## 2. Ablation: retrieval-only vs + ranking
+## 2. Ablation: retrieval-only vs + ranking (test period)
 
 | Setup | NDCG@10 | Coverage@50 |
-|-------|---------|-------------|
-| Two-tower only (retrieval) | 0.0026 | 0.9988 |
-| Two-tower + LightGBM re-rank | 0.0043 | 0.9907 |
-
-Re-ranking bought a **+65% relative NDCG@10 improvement** (0.0026 → 0.0043) for a **0.8 point
-drop in Coverage** (99.88% → 99.07% — both still near-total catalog coverage). This is a very
-favorable trade: the 12 features (popularity, price, category/brand match, recency — see §4)
-let the ranker correct for cases where cosine similarity alone picks a plausible-looking but
-low-engagement item, at almost no cost to how much of the catalog still gets recommended
-somewhere. The ranker is not just reinventing Popularity — if it were, Coverage would have
-collapsed toward Popularity's 0.0066, not stayed at 0.99.
-
-## 3. Cold-start analysis
-
-Test users bucketed by their **train-period** activity count (Notebook 05):
-
-| Activity bucket | Users | Recall@20 (pop) | NDCG@20 (pop) | Recall@20 (two-tower) | NDCG@20 (two-tower) |
-|-----------------|-------|------------------|----------------|------------------------|-----------------------|
-| 1–4 | 1,881 | 0.0194 | 0.0090 | 0.0042 | 0.0022 |
-| 5–19 | 2,688 | 0.0156 | 0.0075 | 0.0056 | 0.0032 |
-| 20+ | 243 | 0.0101 | 0.0080 | 0.0088 | 0.0058 |
-
-**Exactly the expected pattern, and it's clean and monotonic.** Two-tower's Recall@20 relative
-to Popularity's climbs steadily with activity: 22% of Popularity's recall in the coldest
-bucket (1–4 interactions), 36% in the mid bucket (5–19), and 87% in the most active bucket
-(20+) — nearly closing the gap entirely. This makes mechanical sense: the two-tower user tower
-mean-pools a user's history into their vector, so a user with 1–2 train interactions gives it
-almost nothing to work with, while a 20+-interaction user gives it a real signal to
-personalize from. Popularity, having no user-specific signal at all, is flat-to-slightly-declining
-across buckets (its "coldest bucket wins" pattern here is just that low-activity users'
-test-period positives skew toward whatever's broadly popular). The practical implication for
-the webapp: **cold/new users should see Popularity; the more history a user accumulates, the
-more the personalized page should be trusted** — which is exactly what `api/recommender.py`
-already does (`recommend()` falls back to `popular()` when `history_item_ids` is empty).
-
-## 4. Feature importance
-
-| Feature | Gain | Group |
 |---|---|---|
-| `item_age_days` | 2363.8 | temporal |
-| `retriever_score` | 1547.7 | retrieval signal |
-| `item_pop` | 1490.9 | item |
-| `days_since_user_last` | 1078.2 | temporal |
-| `rating_vs_user_mean` | 1064.9 | cross |
-| `item_price` | 921.0 | item |
-| `item_avg_rating` | 850.2 | item |
-| `user_activity` | 667.6 | user |
-| `price_gap` | 627.1 | cross |
-| `user_avg_rating` | 296.8 | user |
-| `cat_match` | 100.9 | cross |
-| `brand_match` | 48.0 | cross |
+| Two-tower only (retrieval) | 0.0011 | 0.9540 |
+| Two-tower + LightGBM | **0.0026** (2.5×) | 0.8535 |
 
-**The two temporal features (`item_age_days`, `days_since_user_last`) rank #1 and #4** —
-together they outweigh `retriever_score` itself. That's a meaningful finding: the two-tower
-retriever's mean-pooled history representation has no explicit notion of recency (see §6,
-limitation #1), so the ranker is doing real work compensating for it, learning "prefer items
-close to the user's last activity" as a correction the retriever can't express.
-`retriever_score` (#2) and `item_pop` (#3) confirm the ranker is still leaning heavily on the
-retrieval signal and on plain popularity, consistent with §1's finding that popularity remains
-a strong accuracy signal at this sample size. **The two exact-match cross-features
-(`cat_match`, `brand_match`) rank lowest by a wide margin** — at 9,487 items and this sample
-size, an exact category/brand match is a sparse, high-variance binary signal that fires rarely,
-while continuous features (price, rating, popularity, recency) are always present and provide
-a gradient the tree can split on more usefully.
+Re-ranking the same top-100 candidates with 12 behavioral/content features raises NDCG@10
+**2.5×** at a ~10-point coverage cost. Coverage staying at 85% (rather than collapsing)
+means the ranker is *not* just reinventing popularity — `item_pop` is only its second
+feature by gain (see §4).
 
-## 5. Latency breakdown
+## 3. Cold-start analysis (test users bucketed by train-period activity)
 
-Measured against the live Docker stack (`scripts/benchmark_latency.py`), 50 calls, real
-trained artifacts (Two-tower + LightGBM active):
+| Bucket (train interactions) | Users | Recall@20 pop | NDCG@20 pop | Recall@20 two-tower | NDCG@20 two-tower |
+|---|---|---|---|---|---|
+| 1–4 | 57,923 | 0.0082 | 0.0036 | 0.0027 | 0.0014 |
+| 5–19 | 63,984 | 0.0076 | 0.0031 | 0.0024 | 0.0012 |
+| 20+ | 6,001 | 0.0045 | 0.0019 | 0.0033 | **0.0017** |
+
+Popularity dominates the cold buckets — a near-empty history gives the user tower almost
+nothing to pool. But the gap **closes monotonically with activity**: in the 20+ bucket the
+two-tower reaches ~90% of Popularity's NDCG@20 while personalizing, and Popularity itself
+*degrades* for heavy users (their tastes drift furthest from the global head). This is the
+empirical basis for the serving design: cold/unknown users get popularity, active users get
+the tower.
+
+Cold *items* are structural: **31.1% of test items never appear in train** — no
+collaborative model can retrieve them. Product-layer mitigations: popularity fallback,
+category onboarding for new accounts, category-guarded similar-items rails.
+
+## 4. Feature importance (LightGBM gain)
+
+| Rank | Feature | Gain | Group |
+|---|---|---|---|
+| 1 | `item_age_days` | 27,705 | temporal |
+| 2 | `item_pop` | 21,174 | item |
+| 3 | `retriever_score` | 12,468 | retrieval |
+| 4 | `item_price` | 8,300 | item |
+| 5 | `brand_match` | 7,909 | cross |
+| 6 | `rating_vs_user_mean` | 7,318 | cross |
+| 7 | `item_avg_rating` | 7,138 | item |
+| 8 | `days_since_user_last` | 6,767 | temporal |
+| 9 | `price_gap` | 6,728 | cross |
+| 10 | `user_activity` | 4,467 | user |
+| 11 | `user_avg_rating` | 3,956 | user |
+| 12 | `cat_match` | 2,727 | cross |
+
+**Freshness beats popularity**: `item_age_days` is the top feature — in electronics, recent
+items dominate future engagement (catalog turnover), something pure embedding similarity
+can't express. All four required feature groups contribute; cross-features (`brand_match`,
+`price_gap`, `rating_vs_user_mean`) collectively rival the top single features, which is
+where the personalization gain over the raw retriever comes from.
+
+## 5. Latency breakdown (live API, full pipeline, 60 calls)
 
 | Component | Mean (ms) | p95 (ms) |
-|-----------|-----------|----------|
-| DB query | 1.01 | 1.21 |
-| User tower | 2.85 | 4.97 |
-| FAISS | 0.37 | 0.35 |
-| LightGBM | 39.81 | 40.36 |
-| **Total** | **47.12** | **54.36** |
+|---|---|---|
+| Postgres history fetch | 1.1 | 1.7 |
+| User tower (TorchScript) | 4.3 | 13.5 |
+| FAISS top-100 (148K × 64) | 1.7 | 2.0 |
+| LightGBM featurize + re-rank | 19.0 | 11.6 |
+| **Total end-to-end** | **27.5** | **35.7** |
 
-**LightGBM dominates the latency budget — 84% of total time.** The user tower, FAISS, and DB
-combined are under 5ms; the LightGBM `.predict()` call over the candidate set is what makes
-this a ~47ms endpoint rather than a ~7ms one. This is the clear next optimization target if
-this were a real SLA discussion: either shrink the candidate set handed to the ranker (100
-candidates → e.g. 50), reduce the model's `num_boost_round`/tree depth, or batch-predict with a
-lighter-weight model format. At ~47ms mean end-to-end, the system is comfortably fast enough
-for an interactive page load, but it's worth knowing exactly where that time goes rather than
-just reporting the total.
+One production lesson worth its own line: the first full-scale deployment measured
+**~1,020ms** in the "LightGBM" step. Profiling showed the model predict was 1ms — the cost
+was `featurize()` calling `Series.map(dict)`, which rebuilds a hash index over the *entire*
+551K-entry feature-store dict on every request. Converting the store's dicts to pandas
+Series once at API startup cut the step to ~19ms — **a 28× end-to-end speedup** from a
+one-line data-structure change. Small-sample benchmarks hide this class of bug entirely.
 
-## 6. Limitations
+## 6. Bonus — MMR diversification (relevance–diversity trade-off)
 
-**1. Sample size directly limits personalization quality (the headline finding of §1).**
-This run used ~131k interactions / 15k users — far below the brief's `MAX_INTERACTIONS =
-5,000,000` cap. §1 shows every learned method losing to Popularity on raw Recall/NDCG, which
-is very unlikely to hold at full scale: more interactions per user is exactly what a
-personalization model needs to differentiate from the popularity prior, and the cold-start
-table (§3) already shows the gap closing sharply as per-user activity increases even within
-this small sample. **Fix:** re-run Notebooks 03–05 against the full 5M-interaction build
-(`python scripts/build_dataset.py` without `--limit`) — the code changes required are none,
-only compute time.
+Maximal Marginal Relevance re-ranking is implemented in the serving API (`mmr_lambda`
+parameter; "Feed variety" slider in the store). Offline sweep on 2,000 test users
+(`scripts/mmr_tradeoff.py`, top-10 lists):
 
-**2. Mean-pooling in the two-tower user tower loses sequence order and recency**, which §4's
-feature importance result makes concrete: the ranker's top two features by gain are both
-temporal signals the retriever's architecture can't express (`UserTower.forward` in
-`src/models/two_tower.py` averages history embeddings with no positional or recency
-weighting — a user's oldest and most recent interaction contribute identically to their
-vector). **Fix:** a sequence-aware user tower (SASRec/GRU4Rec-style, attention or a recurrent
-layer over the history instead of mean pooling) would likely let the retriever itself capture
-what LightGBM is currently compensating for post-hoc, probably improving Two-tower's standalone
-NDCG@10 in §1 and reducing how much weight the ranker needs to put on `item_age_days`.
+| λ | NDCG@10 | Recall@10 | Intra-list similarity |
+|---|---|---|---|
+| 1.0 (off) | 0.00213 | 0.00339 | 0.518 |
+| 0.9 | 0.00211 | 0.00339 | 0.508 |
+| 0.8 | 0.00204 | 0.00331 | 0.494 |
+| 0.7 | 0.00195 | 0.00331 | 0.477 |
+| 0.6 | 0.00205 | 0.00331 | 0.454 |
+| 0.5 | 0.00168 | 0.00258 | 0.424 |
+
+The sweet spot is **λ ≈ 0.6–0.7**: intra-list similarity drops ~12% (visibly fewer
+near-duplicate products) while NDCG@10 stays within ~4–8% of the undiversified list.
+Below λ = 0.5 relevance degrades sharply. The store defaults to λ = 1 and exposes the
+trade-off to the user.
+
+## 7. Limitations
+
+1. **Cold items are unreachable by design** — 31% of test items have no training signal.
+   With more time: content-based item embeddings (title/category text encoder) blended into
+   the FAISS index, so new items are retrievable from day one.
+2. **Absolute recall is small everywhere** — the median user has a handful of interactions
+   and test positives concentrate on head items, so even the best personalized numbers look
+   small in absolute terms. The pairwise story (vs baselines, vs retrieval-only) is the
+   meaningful signal; a no-bias MF-BPR ablation is the natural next experiment to isolate
+   the popularity-collapse mechanism.
+3. **One global ranker** — trained on all users; per-segment rankers (by activity bucket)
+   would likely recover more of the cold-bucket gap identified in §3.

@@ -401,6 +401,13 @@ if "search_query" not in st.session_state:
                                                  # st_searchbox -> "See all results" suggestion)
 if "_last_search_selection" not in st.session_state:
     st.session_state._last_search_selection = None
+for _k, _v in (("n_pop", 20), ("n_rec", 20), ("n_search", 24), ("n_cat", 25)):
+    if _k not in st.session_state:
+        st.session_state[_k] = _v       # per-surface grid sizes, grown by "Load more"
+if "_last_committed_query" not in st.session_state:
+    st.session_state._last_committed_query = ""
+if "_last_category" not in st.session_state:
+    st.session_state._last_category = None
 if "feed_seed" not in st.session_state:
     # One seed per browser session: the API's temperature sampling uses it,
     # so the feed is stable while you browse (no reshuffle on every click)
@@ -540,6 +547,19 @@ def _share_url(item_id):
         return f"{proto}://{host}/?item={item_id}"
     except Exception:
         return f"/?item={item_id}"
+
+
+
+def load_more_button(count_key, step, cap, btn_key, n_returned):
+    """Centered 'Load more' under a grid. Hidden once the surface is
+    exhausted (returned fewer than requested) or at the cap."""
+    if n_returned < st.session_state[count_key] or st.session_state[count_key] >= cap:
+        return
+    _l, _mid, _r = st.columns([2, 1.2, 2])
+    with _mid:
+        if st.button("Load more ↓", key=btn_key, use_container_width=True):
+            st.session_state[count_key] = min(cap, st.session_state[count_key] + step)
+            st.rerun()
 
 
 def render_filter_controls(keyp):
@@ -964,13 +984,27 @@ with st.sidebar:
         st.caption("A recsys demo: different pages, different models — on purpose.")
         temp = st.slider("Diversity (temperature)", 0.0, 3.0, 1.0, 0.1)
         st.caption("Results resample as you adjust this — the API applies temperature sampling server-side.")
-        if st.button("📊 Analytics", use_container_width=True):
-            st.session_state.page = "analytics"
-            st.session_state.selected_item = None
-            st.rerun()
     else:
         st.caption("Electronics picks, personalized to you.")
         temp = 1.0
+
+    # Client-facing variety control (MMR re-ranking) -- visible for everyone,
+    # applied to both the trending and the personalized feed. The UI uses a
+    # friendly 1-3 scale; MMR's lambda is mathematically a 0-1 mixing weight
+    # (lam*relevance - (1-lam)*similarity), so we map: 1 -> lam=1.0 (off),
+    # 2 -> 0.75, 3 -> 0.5 (max variety).
+    st.markdown("**Feed variety**")
+    variety = st.slider("Variety", 1.0, 3.0, 1.0, 0.25, label_visibility="collapsed",
+                        help="Maximal Marginal Relevance re-ranking: each pick trades relevance "
+                             "against similarity to items already picked. 1 = pure relevance, "
+                             "3 = maximum variety.")
+    mmr_lam = round(1.0 - (variety - 1.0) * 0.25, 3)
+    st.caption("Drag right for more varied picks — fewer near-identical products.")
+
+    if DEBUG and st.button("📊 Analytics", use_container_width=True):
+        st.session_state.page = "analytics"
+        st.session_state.selected_item = None
+        st.rerun()
     if st.session_state.user_id:
         st.success(f"Browsing as `{st.session_state.user_id}`")
         if DEBUG:
@@ -1126,15 +1160,20 @@ def render_analytics_page():
 
 
 def model_caption(model_label, latency_ms):
-    """Engineering telemetry (which model served this section, and how fast).
-    Hidden in client mode -- append ?debug=1 to the URL to show it."""
-    if not DEBUG:
-        return
+    """Which model served this section -- ALWAYS shown (the course brief
+    requires displaying which model produced each recommendation). The
+    latency pill is engineering telemetry and stays debug-only.
+
+    Single-line HTML on purpose: with the latency span empty, a multi-line
+    block leaves a whitespace-only line, CommonMark ends the HTML block
+    there, and the orphaned </div> renders as text while the unclosed <div>
+    swallows sibling nodes -- which then crashes React reconciliation with
+    removeChild errors on the cards below."""
+    latency_html = (f'<span class="ep-latency-pill">{_latency_ms_text(latency_ms)}</span>'
+                    if DEBUG else "")
     st.markdown(
-        f"""<div class="ep-model-caption">
-            <span class="ep-model-pill">model: {model_label}</span>
-            <span class="ep-latency-pill">{_latency_ms_text(latency_ms)}</span>
-        </div>""",
+        f'<div class="ep-model-caption"><span class="ep-model-pill">model: {model_label}</span>'
+        f'{latency_html}</div>',
         unsafe_allow_html=True,
     )
 
@@ -1271,8 +1310,11 @@ if search_query.strip():
     # catalog but not in today's recommendations should still find something.
     st.markdown(f'<div class="ep-section-title">Search results for &quot;{search_query}&quot;</div>',
                unsafe_allow_html=True)
+    if st.session_state._last_committed_query != search_query:
+        st.session_state._last_committed_query = search_query
+        st.session_state.n_search = 24          # new query -> reset grid size
     _filters = render_filter_controls("s")
-    data = get(f"/search?q={quote(search_query.strip())}&n=24{_filters}")
+    data = get(f"/search?q={quote(search_query.strip())}&n={st.session_state.n_search}{_filters}")
     if data:
         items = data["items"]
         if not items:
@@ -1290,6 +1332,7 @@ if search_query.strip():
                                     help=it.get("title")):
                             _select_item(it["item_id"])
             render_grid(items, "Search", key_prefix="search")
+            load_more_button("n_search", 24, 96, "more-search", len(items))
 elif st.session_state.page == "wishlist" and st.session_state.user_id:
     render_wishlist_page()
 elif st.session_state.page == "cart" and st.session_state.user_id:
@@ -1300,21 +1343,32 @@ elif st.session_state.page == "analytics" and DEBUG:
     render_analytics_page()
 elif _active_category:
     st.markdown(f'<div class="ep-section-title">{_active_category}</div>', unsafe_allow_html=True)
+    if st.session_state._last_category != _active_category:
+        st.session_state._last_category = _active_category
+        st.session_state.n_cat = 25             # new category -> reset grid size
     _filters = render_filter_controls("c")
-    data = get(f"/category/{quote(_active_category)}?n=25{_filters}")
+    data = get(f"/category/{quote(_active_category)}?n={st.session_state.n_cat}{_filters}")
     if data:
         model_caption(data["model_label"], data["latency_ms"])
         render_grid(data["items"], data["model_label"], key_prefix="cat")
+        load_more_button("n_cat", 25, 100, "more-cat", len(data["items"]))
 elif not st.session_state.user_id:
     st.markdown('<div class="ep-hero"><div class="ep-hero-title">Find your next favorite gadget ⚡</div>'
                 '<div class="ep-hero-sub">Trending picks refresh on every visit — log in and they '
                 'start learning what <em>you</em> love.</div></div>', unsafe_allow_html=True)
     st.markdown('<div class="ep-eyebrow">What everyone\'s buying</div>'
                 '<div class="ep-section-title">Trending electronics</div>', unsafe_allow_html=True)
-    data = get(f"/popular?n=20&seed={st.session_state.feed_seed}")
-    if data:
-        model_caption(data["model_label"], data["latency_ms"])
-        render_grid(data["items"], data["model_label"], key_prefix="pop")
+    # Keyed by feed seed: a logo click / reload changes the seed, and the new
+    # key REMOUNTS this whole subtree instead of patching nodes in place --
+    # browser extensions that mutate the DOM (Grammarly-style scanners)
+    # otherwise make React's reconciliation crash with removeChild errors.
+    with st.container(key=f"popfeed-{st.session_state.feed_seed}-{st.session_state.n_pop}"):
+        data = get(f"/popular?n={st.session_state.n_pop}&seed={st.session_state.feed_seed}"
+                   f"&mmr_lambda={mmr_lam}")
+        if data:
+            model_caption(data["model_label"], data["latency_ms"])
+            render_grid(data["items"], data["model_label"], key_prefix="pop")
+            load_more_button("n_pop", 20, 60, "more-pop", len(data["items"]))
 else:
     # Cold-start onboarding: a brand-new account has nothing for the model
     # to read, so the first feed would be generic popularity. Two "like"
@@ -1351,11 +1405,15 @@ else:
     st.markdown('<div class="ep-eyebrow" style="margin-top:0.8rem;">Picked for you</div>'
                 '<div class="ep-section-title">For you</div>',
                 unsafe_allow_html=True)
-    data = get(f"/recommend/{st.session_state.user_id}?n=20&temperature={temp}"
-               f"&seed={st.session_state.feed_seed}")
-    if data:
-        model_caption(data["model_label"], data["latency_ms"])
-        render_grid(data["items"], data["model_label"], key_prefix="rec")
+    # Seed-keyed remount, same reasoning as the trending feed above.
+    with st.container(key=f"recfeed-{st.session_state.feed_seed}-{st.session_state.n_rec}"):
+        data = get(f"/recommend/{st.session_state.user_id}?n={st.session_state.n_rec}"
+                   f"&temperature={temp}"
+                   f"&seed={st.session_state.feed_seed}&mmr_lambda={mmr_lam}")
+        if data:
+            model_caption(data["model_label"], data["latency_ms"])
+            render_grid(data["items"], data["model_label"], key_prefix="rec")
+            load_more_button("n_rec", 20, 50, "more-rec", len(data["items"]))
 
     byl = get(f"/because-you-liked/{st.session_state.user_id}?n=10")
     if byl:

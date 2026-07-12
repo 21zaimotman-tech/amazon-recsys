@@ -15,7 +15,28 @@ from .recommender import Recommender
 from .schemas import (RecResponse, Item, RegisterRequest, LoginRequest, AuthResponse,
                       CartResponse, OrderItem, OrdersResponse)
 
-app = FastAPI(title="Electronics RecSys API", version="0.1.0")
+app = FastAPI(
+    title="ElectroPicks — Electronics RecSys API",
+    version="1.0.0",
+    description=(
+        "Real-time recommendation service for the ElectroPicks store.\n\n"
+        "**Serving pipeline (logged-in user):** Postgres history (last 20 distinct items) → "
+        "TorchScript two-tower user encoder → FAISS top-100 retrieval over 148K item embeddings → "
+        "LightGBM LambdaRank re-rank → seeded temperature sampling + brand cap → top-N with "
+        "per-item 'Because you viewed …' reasons. Cold/unknown users fall back to popularity.\n\n"
+        "Every response includes `model_label` (which model served it) and `latency_ms` "
+        "(per-component timings). Behavioral events logged here are read by the very next "
+        "recommendation request — realtime personalization without retraining."
+    ),
+    openapi_tags=[
+        {"name": "recommendations", "description": "Model-served feeds: popularity, personalized, similar items, recently viewed"},
+        {"name": "catalog", "description": "Search, type-ahead suggestions, categories, and single-item lookup"},
+        {"name": "auth", "description": "Accounts and reload-surviving sessions (30-day expiry, login throttled 5 fails / 10 min)"},
+        {"name": "behavior", "description": "Event logging — the input signal for realtime personalization"},
+        {"name": "commerce", "description": "Cart with quantities, checkout, single-item buy, wishlist, order history"},
+        {"name": "admin", "description": "Health and analytics aggregates"},
+    ],
+)
 rec = Recommender()                  # loads artifacts once at startup
 
 
@@ -64,16 +85,17 @@ def _attach_reasons(conn, items, history_ids):
     return items
 
 
-@app.get("/health")
+@app.get("/health", tags=["admin"])
 def health():
     return {"status": "ok", "artifacts": {k: getattr(rec, k) is not None
             for k in ["popularity", "faiss", "tower", "ranker", "sim"]}}
 
 
-@app.get("/popular", response_model=RecResponse)
-def popular(n: int = 10, temperature: float = 1.0, seed: int = None):
+@app.get("/popular", response_model=RecResponse, tags=["recommendations"])
+def popular(n: int = 10, temperature: float = 1.0, seed: int = None, mmr_lambda: float = 1.0):
     t0 = time.perf_counter()
-    ids, label = rec.popular(n * 2, temperature, seed)   # over-fetch for the brand cap
+    ids, label = rec.popular(n * 2, temperature, seed,   # over-fetch for the brand cap
+                             mmr_lambda=mmr_lambda)
     conn = get_conn()
     try:
         items = _brand_cap(_to_items(conn, ids), n)
@@ -83,8 +105,12 @@ def popular(n: int = 10, temperature: float = 1.0, seed: int = None):
                        latency_ms={"total": (time.perf_counter() - t0) * 1e3})
 
 
-@app.get("/recommend/{user_id}", response_model=RecResponse)
-def recommend(user_id: str, n: int = 10, temperature: float = 1.0, seed: int = None):
+@app.get("/recommend/{user_id}", response_model=RecResponse, tags=["recommendations"])
+def recommend(user_id: str, n: int = 10, temperature: float = 1.0, seed: int = None,
+              mmr_lambda: float = 1.0):
+    """Personalized feed. `mmr_lambda` < 1 enables Maximal Marginal Relevance
+    diversification: each pick maximizes λ·relevance − (1−λ)·max-similarity to
+    the items already picked (λ=1 → pure relevance order)."""
     t0 = time.perf_counter()
     conn = get_conn()
     try:
@@ -92,7 +118,8 @@ def recommend(user_id: str, n: int = 10, temperature: float = 1.0, seed: int = N
         history = fetch_user_history(conn, user_id, limit=20)
         db_ms = (time.perf_counter() - s) * 1e3
         ids, label, timings = rec.recommend(user_id, history, n=n * 2,
-                                            temperature=temperature, seed=seed)
+                                            temperature=temperature, seed=seed,
+                                            mmr_lambda=mmr_lambda)
         items = _brand_cap(_to_items(conn, ids), n)      # over-fetched above for the cap
         items = _attach_reasons(conn, items, history)
     finally:
@@ -102,7 +129,7 @@ def recommend(user_id: str, n: int = 10, temperature: float = 1.0, seed: int = N
     return RecResponse(model_label=label, items=items, latency_ms=timings)
 
 
-@app.get("/recent/{user_id}", response_model=RecResponse)
+@app.get("/recent/{user_id}", response_model=RecResponse, tags=["recommendations"])
 def recently_viewed(user_id: str, n: int = 10):
     """The user's own most recent distinct items ('Keep browsing') -- straight
     from the interaction log, no model involved."""
@@ -117,7 +144,7 @@ def recently_viewed(user_id: str, n: int = 10):
                        latency_ms={"total": (time.perf_counter() - t0) * 1e3})
 
 
-@app.get("/item/{item_id}", response_model=Item)
+@app.get("/item/{item_id}", response_model=Item, tags=["catalog"])
 def item_lookup(item_id: str):
     """Single-item metadata -- lets a shared product URL (?item=...) render
     the detail panel without the item having been browsed first."""
@@ -131,7 +158,7 @@ def item_lookup(item_id: str):
     return Item(**it)
 
 
-@app.get("/categories")
+@app.get("/categories", tags=["catalog"])
 def categories(n: int = 12):
     """Most-stocked categories, for the homepage browse strip and the
     cold-start onboarding picker."""
@@ -143,7 +170,7 @@ def categories(n: int = 12):
     return {"categories": cats}
 
 
-@app.get("/category/{name}", response_model=RecResponse)
+@app.get("/category/{name}", response_model=RecResponse, tags=["catalog"])
 def category_browse(name: str, n: int = 24, sort: str = "rating", min_rating: float = None,
                     price_min: float = None, price_max: float = None, brand: str = None):
     """Browse-by-category grid, with the same filter/sort options as /search."""
@@ -159,7 +186,7 @@ def category_browse(name: str, n: int = 24, sort: str = "rating", min_rating: fl
                        latency_ms={"total": (time.perf_counter() - t0) * 1e3})
 
 
-@app.get("/similar/{item_id}", response_model=RecResponse)
+@app.get("/similar/{item_id}", response_model=RecResponse, tags=["recommendations"])
 def similar(item_id: str, n: int = 10):
     """Embedding neighbors, guarded by category: 'Similar items' on a
     headphone must show headphones. A long-tail item's embedding is mostly
@@ -187,7 +214,7 @@ def similar(item_id: str, n: int = 10):
                        latency_ms={"total": (time.perf_counter() - t0) * 1e3})
 
 
-@app.get("/because-you-liked/{user_id}", response_model=RecResponse)
+@app.get("/because-you-liked/{user_id}", response_model=RecResponse, tags=["recommendations"])
 def because_you_liked(user_id: str, n: int = 10):
     """Pick one item from the user's history, show items similar to THAT item."""
     t0 = time.perf_counter()
@@ -208,7 +235,7 @@ def because_you_liked(user_id: str, n: int = 10):
                        latency_ms={"total": (time.perf_counter() - t0) * 1e3, "seed_item": seed})
 
 
-@app.get("/search", response_model=RecResponse)
+@app.get("/search", response_model=RecResponse, tags=["catalog"])
 def search(q: str, n: int = 20, sort: str = "relevance", min_rating: float = None,
            price_min: float = None, price_max: float = None, brand: str = None):
     """Full-catalog search (title/brand/category) with optional filters and
@@ -226,7 +253,7 @@ def search(q: str, n: int = 20, sort: str = "relevance", min_rating: float = Non
 
 
 # ---------------------------------------------------------------- accounts
-@app.get("/suggest")
+@app.get("/suggest", tags=["catalog"])
 def suggest(q: str, n: int = 8):
     """Type-ahead query completions for the search box ("head" ->
     ["headphones", "headset", ...]). Word suggestions, not product titles --
@@ -239,7 +266,7 @@ def suggest(q: str, n: int = 8):
     return {"suggestions": words}
 
 
-@app.post("/auth/register", response_model=AuthResponse, status_code=201)
+@app.post("/auth/register", response_model=AuthResponse, status_code=201, tags=["auth"])
 def register(body: RegisterRequest):
     if not body.user_id.strip() or not body.password:
         raise HTTPException(400, "user_id and password are required")
@@ -270,7 +297,7 @@ def _throttled(user_id):
     return len(dq) >= _FAIL_LIMIT
 
 
-@app.post("/auth/login", response_model=AuthResponse)
+@app.post("/auth/login", response_model=AuthResponse, tags=["auth"])
 def login(body: LoginRequest):
     if _throttled(body.user_id):
         raise HTTPException(429, "too many failed attempts — try again in a few minutes")
@@ -287,7 +314,7 @@ def login(body: LoginRequest):
     return AuthResponse(user_id=user["user_id"], n_interactions=user["n_interactions"], token=token)
 
 
-@app.get("/auth/session/{token}", response_model=AuthResponse)
+@app.get("/auth/session/{token}", response_model=AuthResponse, tags=["auth"])
 def session_lookup(token: str):
     """Resolves a 'remember me' token (stashed in the frontend's URL query
     string, which survives a hard browser reload unlike st.session_state)
@@ -303,7 +330,7 @@ def session_lookup(token: str):
     return AuthResponse(user_id=user["user_id"], n_interactions=user["n_interactions"], token=token)
 
 
-@app.delete("/auth/session/{token}")
+@app.delete("/auth/session/{token}", tags=["auth"])
 def session_logout(token: str):
     conn = get_conn()
     try:
@@ -314,7 +341,7 @@ def session_logout(token: str):
 
 
 # ---------------------------------------------------------------- behavior events + cart
-@app.post("/events/{user_id}/{item_id}")
+@app.post("/events/{user_id}/{item_id}", tags=["behavior"])
 def record_event(user_id: str, item_id: str, event_type: str = "view"):
     """Logs a view/like/cart-add as a real interaction row -- the very next
     /recommend call for this user re-reads history fresh from Postgres, so
@@ -330,7 +357,7 @@ def record_event(user_id: str, item_id: str, event_type: str = "view"):
     return {"status": "ok"}
 
 
-@app.post("/cart/{user_id}/{item_id}")
+@app.post("/cart/{user_id}/{item_id}", tags=["commerce"])
 def cart_add(user_id: str, item_id: str):
     conn = get_conn()
     try:
@@ -340,7 +367,7 @@ def cart_add(user_id: str, item_id: str):
     return {"status": "ok"}
 
 
-@app.put("/cart/{user_id}/{item_id}")
+@app.put("/cart/{user_id}/{item_id}", tags=["commerce"])
 def cart_set_qty(user_id: str, item_id: str, qty: int):
     """Set a cart line's quantity explicitly (the cart page's -/+ steppers).
     qty <= 0 removes the line."""
@@ -352,7 +379,7 @@ def cart_set_qty(user_id: str, item_id: str, qty: int):
     return {"status": "ok"}
 
 
-@app.delete("/cart/{user_id}/{item_id}")
+@app.delete("/cart/{user_id}/{item_id}", tags=["commerce"])
 def cart_remove(user_id: str, item_id: str):
     conn = get_conn()
     try:
@@ -362,7 +389,7 @@ def cart_remove(user_id: str, item_id: str):
     return {"status": "ok"}
 
 
-@app.get("/cart/{user_id}", response_model=CartResponse)
+@app.get("/cart/{user_id}", response_model=CartResponse, tags=["commerce"])
 def cart_view(user_id: str):
     conn = get_conn()
     try:
@@ -372,7 +399,7 @@ def cart_view(user_id: str):
     return CartResponse(items=[Item(**it) for it in items])
 
 
-@app.post("/checkout/{user_id}", response_model=CartResponse)
+@app.post("/checkout/{user_id}", response_model=CartResponse, tags=["commerce"])
 def cart_checkout(user_id: str):
     """Cart checkout: no real payment (this is a demo), but logs every cart
     item as a purchase -- the strongest positive signal -- and empties the
@@ -385,7 +412,7 @@ def cart_checkout(user_id: str):
     return CartResponse(items=[Item(**it) for it in items])
 
 
-@app.post("/buy/{user_id}/{item_id}", response_model=CartResponse)
+@app.post("/buy/{user_id}/{item_id}", response_model=CartResponse, tags=["commerce"])
 def buy_single(user_id: str, item_id: str):
     """Single-item 'Buy now' from a product page. Leaves the cart untouched --
     distinct from /checkout, which purchases and clears the whole cart."""
@@ -400,7 +427,7 @@ def buy_single(user_id: str, item_id: str):
 
 
 # ---------------------------------------------------------------- wishlist
-@app.post("/wishlist/{user_id}/{item_id}")
+@app.post("/wishlist/{user_id}/{item_id}", tags=["commerce"])
 def wishlist_add(user_id: str, item_id: str):
     conn = get_conn()
     try:
@@ -410,7 +437,7 @@ def wishlist_add(user_id: str, item_id: str):
     return {"status": "ok"}
 
 
-@app.delete("/wishlist/{user_id}/{item_id}")
+@app.delete("/wishlist/{user_id}/{item_id}", tags=["commerce"])
 def wishlist_remove(user_id: str, item_id: str):
     conn = get_conn()
     try:
@@ -420,7 +447,7 @@ def wishlist_remove(user_id: str, item_id: str):
     return {"status": "ok"}
 
 
-@app.get("/wishlist/{user_id}", response_model=CartResponse)
+@app.get("/wishlist/{user_id}", response_model=CartResponse, tags=["commerce"])
 def wishlist_view(user_id: str):
     conn = get_conn()
     try:
@@ -431,7 +458,7 @@ def wishlist_view(user_id: str):
 
 
 # ---------------------------------------------------------------- order history
-@app.get("/orders/{user_id}", response_model=OrdersResponse)
+@app.get("/orders/{user_id}", response_model=OrdersResponse, tags=["commerce"])
 def orders_view(user_id: str):
     conn = get_conn()
     try:
@@ -444,7 +471,7 @@ def orders_view(user_id: str):
 
 
 # ---------------------------------------------------------------- admin
-@app.get("/admin/stats")
+@app.get("/admin/stats", tags=["admin"])
 def stats():
     """Aggregates for the frontend's debug-mode analytics page."""
     conn = get_conn()

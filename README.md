@@ -4,6 +4,8 @@ End-to-end recommender system: **22.6M raw reviews → trained retrieval + ranki
 models → a live web store** where every click reshapes the next page. Dataset:
 Amazon Reviews 2023, **Electronics** (McAuley-Lab/Amazon-Reviews-2023, HuggingFace).
 
+![ElectroPicks demo](assets/demo.gif)
+
 Stack: PyTorch (models from scratch) · FAISS · LightGBM · FastAPI · Postgres ·
 Streamlit · Docker Compose (+ Caddy production overlay).
 
@@ -21,9 +23,10 @@ Test-period evaluation, train-seen items excluded, positives = rating ≥ 4.0.
 | Random | 0.0001 | 0.0001 | 0.0003 | 0.0001 | 1.0000 |
 | Popularity | 0.0035 | 0.0021 | 0.0191 | 0.0062 | 0.0005 |
 | MF-BPR | 0.0035 | 0.0020 | 0.0190 | 0.0059 | 0.0005 |
-| Two-tower | 0.0018 | 0.0011 | 0.0042 | 0.0017 | **0.9503** | | | | |
+| Two-tower | 0.0018 | 0.0011 | 0.0042 | 0.0017 | 0.9540 |
+| **Two-tower + LightGBM** | **0.0037** | **0.0026** | 0.0059 | 0.0032 | **0.8535** |
 
-Two findings worth reading together (full discussion in `PROJECT_EXPLAINED.md` §5–6):
+Three findings worth reading together (full discussion in `ANALYSIS.md`):
 
 - **MF-BPR converged to a popularity clone** — with retrieval made faithful to the
   training objective (item bias folded into the FAISS index), its per-item bias term
@@ -32,6 +35,17 @@ Two findings worth reading together (full discussion in `PROJECT_EXPLAINED.md` �
 - **The two-tower trades recall for genuine personalization** — 95% catalog coverage
   vs Popularity's 0.05%. Never read Recall without Coverage: a recommender can score
   well by showing everyone the same ~70 bestsellers.
+- **The full pipeline is the only personalized method that beats Popularity on
+  NDCG@10** (+25%), with a 2.5× lift over retrieval-only, while covering 85% of the
+  catalog.
+
+**Average API response time (full pipeline, live):** **27.5 ms mean / 35.7 ms p95**
+end-to-end over 60 calls — per-component breakdown in `ANALYSIS.md` §5, including the
+28× serving optimization that got it there.
+
+**Bonus — MMR diversification:** Maximal Marginal Relevance re-ranking in the serving
+API and a "Feed variety" slider in the store; λ sweep in `ANALYSIS.md` §6 (best
+trade-off at λ ≈ 0.6–0.7).
 
 ## Architecture
 

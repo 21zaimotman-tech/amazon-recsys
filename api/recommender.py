@@ -31,8 +31,19 @@ class Recommender:
         self.ranker = self._maybe(lambda: pickle.load(open(ART / "lgbm.pkl", "rb")))
         self.sim = self._maybe(lambda: json.load(open(ART / "similar_items.json")))
         fs = self._maybe(lambda: pickle.load(open(ART / "feature_store.pkl", "rb")))
-        self.store = fs["store"] if fs else None
-        self.now_ts = fs["now_ts"] if fs else None
+        if fs:
+            # Convert the store's dicts to pandas Series ONCE: featurize()
+            # uses Series.map(...) per feature, and pandas rebuilds a hash
+            # index from a raw dict on EVERY map call -- ~1.2s/request with
+            # the full 551K-user store (vs ~1ms for the actual LightGBM
+            # predict). Mapping against prebuilt Series is O(rows).
+            import pandas as pd
+            self.store = {k: (pd.Series(v) if isinstance(v, dict) else v)
+                          for k, v in fs["store"].items()}
+            self.now_ts = fs["now_ts"]
+        else:
+            self.store = None
+            self.now_ts = None
 
     def _maybe(self, fn):
         try:
@@ -55,16 +66,24 @@ class Recommender:
                 return F.normalize(m(h, mask), dim=-1)[0].numpy()
         return fn
 
-    def popular(self, n=10, temperature=1.0, seed=None):
+    def popular(self, n=10, temperature=1.0, seed=None, mmr_lambda=1.0):
         """Weighted sample from the popularity head (not a fixed top-n) so
         the trending feed is different on every page load. `seed` comes from
         the frontend's per-browser-session feed seed: stable while the user
-        browses, fresh on reload."""
+        browses, fresh on reload. mmr_lambda < 1 diversifies the pool with
+        MMR first (relevance = popularity rank)."""
         pool = (self.popularity or [])[: max(n * 3, 60)]
-        return _sample(pool, n, temperature, seed), "Popular right now"
+        label = "Popular right now"
+        if mmr_lambda < 0.999 and pool:
+            rank_rel = {it: 1.0 - k / len(pool) for k, it in enumerate(pool)}
+            pool = self.mmr(pool, rank_rel, n=len(pool), lam=mmr_lambda)
+            label += f" + MMR(λ={mmr_lambda:g})"
+        return _sample(pool, n, temperature, seed), label
 
-    def recommend(self, user_id, history_item_ids, n=10, temperature=1.0, seed=None):
-        """Returns (item_ids, model_label, timings_ms)."""
+    def recommend(self, user_id, history_item_ids, n=10, temperature=1.0, seed=None,
+                  mmr_lambda=1.0):
+        """Returns (item_ids, model_label, timings_ms). mmr_lambda < 1 applies
+        Maximal Marginal Relevance diversification before sampling."""
         t = {}
         if not history_item_ids or self.faiss is None or self.tower is None:
             items, label = self.popular(n, temperature, seed)
@@ -87,15 +106,51 @@ class Recommender:
         t["faiss"] = (time.perf_counter() - s) * 1e3
 
         if self.ranker is None or self.store is None:        # retrieval-only (pre-S4)
-            return _sample(cands, n, temperature, seed), "Two-tower", t
+            ordered, scores, label = cands, cand_scores, "Two-tower"
+        else:
+            s = time.perf_counter()
+            ordered, scores = self._rerank(user_id, cands, cand_scores)
+            t["lgbm"] = (time.perf_counter() - s) * 1e3
+            label = "Two-tower + LightGBM"
 
-        s = time.perf_counter()
-        ranked = self._rerank(user_id, cands, cand_scores)
-        t["lgbm"] = (time.perf_counter() - s) * 1e3
-        return _sample(ranked, n, temperature, seed), "Two-tower + LightGBM", t
+        if mmr_lambda < 0.999:
+            s = time.perf_counter()
+            ordered = self.mmr(ordered, scores, n=len(ordered), lam=mmr_lambda)
+            t["mmr"] = (time.perf_counter() - s) * 1e3
+            label += f" + MMR(λ={mmr_lambda:g})"
+
+        return _sample(ordered, n, temperature, seed), label, t
+
+    def mmr(self, cands, rel_scores, n, lam=0.7):
+        """Maximal Marginal Relevance re-ranking (bonus):
+        pick items one by one, each maximizing
+            lam * relevance(i)  -  (1 - lam) * max_similarity(i, already_picked)
+        so the list stays relevant but avoids near-duplicates. Relevance is
+        min-max-normalized to [0,1] so lam trades off against cosine
+        similarity on a comparable scale. lam=1 -> pure relevance order."""
+        kept = [c for c in cands if c in self.idx_map]
+        if not kept or self.item_emb is None:
+            return cands[:n]
+        V = self.item_emb[[self.idx_map[c] for c in kept]].astype("float32")
+        V /= (np.linalg.norm(V, axis=1, keepdims=True) + 1e-9)
+        rel = np.array([rel_scores.get(c, 0.0) for c in kept], dtype="float64")
+        if rel.max() > rel.min():
+            rel = (rel - rel.min()) / (rel.max() - rel.min())
+        sims = V @ V.T
+        selected, remaining = [], list(range(len(kept)))
+        while remaining and len(selected) < n:
+            if not selected:
+                best = max(remaining, key=lambda i: rel[i])
+            else:
+                best = max(remaining,
+                           key=lambda i: lam * rel[i] - (1 - lam) * sims[i, selected].max())
+            selected.append(best)
+            remaining.remove(best)
+        return [kept[i] for i in selected]
 
     def _rerank(self, user_id, cands, cand_scores):
-        """Compute ranking features online and re-order candidates."""
+        """Compute ranking features online and re-order candidates.
+        Returns (ordered_ids, {item_id: lgbm_score})."""
         import pandas as pd
         import sys; sys.path.insert(0, "/app")
         from src.ranking.features import featurize, FEATURE_NAMES
@@ -105,7 +160,7 @@ class Recommender:
         feats = featurize(df, self.store, self.now_ts or 0)
         scores = self.ranker.predict(feats[FEATURE_NAMES])
         order = np.argsort(-scores)
-        return [cands[i] for i in order]
+        return [cands[i] for i in order], {cands[i]: float(scores[i]) for i in order}
 
     def similar(self, item_id, n=10):
         if self.sim and item_id in self.sim:
